@@ -1,4 +1,4 @@
-# Claude Code Kickoff - Solar Shadow Study
+# Claude Code Kickoff - SolarShade
 
 Use this prompt to have Claude Code build the application end to end.
 
@@ -6,7 +6,7 @@ Use this prompt to have Claude Code build the application end to end.
 
 ## Prompt
 
-You are building a new application called Solar Shadow Study.
+You are building a new application called SolarShade.
 
 Read `SPEC.md` first and treat it as the source of truth for product scope, architecture, data contracts, UX, and validation goals.
 
@@ -50,7 +50,7 @@ The most important metric is irradiance-weighted annual shading percentage. Raw 
 frontend/
   package.json
   public/index.html
-  src/SolarShadowApp.jsx
+  src/SolarShadeApp.jsx
 solar.py
 geometry.py
 panels.py

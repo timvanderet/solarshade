@@ -1,6 +1,6 @@
-# Solar Shadow Study
+# SolarShade
 
-Solar Shadow Study is a map-first web application for modeling how nearby trees reduce solar production on a panel array over the course of a year.
+SolarShade is a map-first web application for modeling how nearby trees reduce solar production on a panel array over the course of a year.
 
 Users trace a solar panel footprint directly on satellite imagery, place trees, and run a full-year hourly simulation. The primary output is an irradiance-weighted shading percentage, which estimates true energy impact rather than simply counting shaded hours.
 
@@ -46,13 +46,13 @@ The intended UI architecture is a single React app mounted as a Streamlit custom
 ## Intended Project Structure
 
 ```text
-solar-shadow-study/
+solarshade/
 ├── frontend/
 │   ├── package.json
 │   ├── public/
 │   │   └── index.html
 │   └── src/
-│       └── SolarShadowApp.jsx
+│       └── SolarShadeApp.jsx
 ├── solar.py
 ├── geometry.py
 ├── panels.py

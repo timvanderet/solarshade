@@ -1,8 +1,8 @@
-# Solar Shadow Study - Technical Specification
+# SolarShade - Technical Specification
 
 ## 1. Product Summary
 
-Solar Shadow Study is a web app for estimating how much nearby trees shade a solar panel array over a full year.
+SolarShade is a web app for estimating how much nearby trees shade a solar panel array over a full year.
 
 The user:
 
@@ -72,7 +72,7 @@ Architecture boundary:
 ### Major Files
 
 ```text
-frontend/src/SolarShadowApp.jsx
+frontend/src/SolarShadeApp.jsx
 solar.py
 geometry.py
 panels.py

@@ -321,7 +321,7 @@ function ensureClockwise(corners) {
 }
 
 // ── Main Component ───────────────────────────────────────────────────────────
-function SolarShadowApp({ args }) {
+function SolarShadeApp({ args }) {
   const {
     google_maps_api_key: apiKey = "",
     results = null,
@@ -716,7 +716,7 @@ function SolarShadowApp({ args }) {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = "solar-shadow-config.json";
+    a.download = "solarshade-config.json";
     a.click();
     URL.revokeObjectURL(url);
   }
@@ -790,7 +790,7 @@ function SolarShadowApp({ args }) {
     <div style={S.root}>
       {/* Sidebar */}
       <div style={S.sidebar}>
-        <div style={S.sidebarHeader}>☀ Solar Shadow Study</div>
+        <div style={S.sidebarHeader}>☀ SolarShade</div>
         <div style={S.sidebarScroll}>
           {/* Address search */}
           <div style={S.section}>
@@ -1142,4 +1142,4 @@ function PlotlyEmbed({ figJson }) {
   return <iframe ref={ref} style={{ width: "100%", height: 280, border: "none" }} title="chart" />;
 }
 
-export default withStreamlitConnection(SolarShadowApp);
+export default withStreamlitConnection(SolarShadeApp);

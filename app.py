@@ -6,7 +6,7 @@ import uuid
 import streamlit as st
 import streamlit.components.v1 as components
 
-st.set_page_config(layout="wide", page_title="Solar Shadow Study")
+st.set_page_config(layout="wide", page_title="SolarShade")
 
 # Suppress Streamlit chrome and make the component fill the viewport.
 # Blank-page root cause: Streamlit wraps the custom component iframe in a
@@ -37,7 +37,7 @@ st.markdown("""
   }
 
   /* Make the custom component iframe fill the full viewport */
-  iframe[title="solar_shadow_app"] {
+  iframe[title="solarshade"] {
     width: 100vw !important;
     height: 100vh !important;
     border: none !important;
@@ -52,11 +52,11 @@ GOOGLE_MAPS_API_KEY = os.environ.get("GOOGLE_MAPS_API_KEY", "")
 _DEV_MODE = os.environ.get("SOLAR_DEV", "").lower() in ("1", "true", "yes")
 if _DEV_MODE:
     _component_func = components.declare_component(
-        "solar_shadow_app", url="http://localhost:3001"
+        "solarshade", url="http://localhost:3001"
     )
 else:
     _component_func = components.declare_component(
-        "solar_shadow_app", path=os.path.join(os.path.dirname(__file__), "frontend", "build")
+        "solarshade", path=os.path.join(os.path.dirname(__file__), "frontend", "build")
     )
 
 # Session state defaults

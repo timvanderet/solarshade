@@ -303,7 +303,7 @@ if __name__ == "__main__":
     results = run_scenario(panel_corners, panel_tilt_deg, trees, year=2025)
 
     print("=" * 50)
-    print("SOLAR SHADOW STUDY - Sample Scenario Results")
+    print("SOLARSHADE - Sample Scenario Results")
     print("=" * 50)
     print(f"Panel azimuth:       {results['panel_azimuth_deg']:.1f}°")
     print(f"Panel area:          {results['panel_area_m2']:.1f} m²")

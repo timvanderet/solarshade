@@ -302,10 +302,10 @@ function SolarShadowApp({ args }) {
   // Load Google Maps
   useEffect(() => {
     if (!apiKey || window._googleMapsLoading) return;
-    if (window.google?.maps) { setMapLoaded(true); return; }
+    if (window.google?.maps?.Map) { setMapLoaded(true); return; }
     window._googleMapsLoading = true;
     const script = document.createElement("script");
-    script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&loading=async&libraries=marker`;
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&v=weekly&libraries=places`;
     script.async = true;
     script.onload = () => { window._googleMapsLoading = false; setMapLoaded(true); };
     document.head.appendChild(script);

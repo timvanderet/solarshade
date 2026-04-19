@@ -8,13 +8,40 @@ import streamlit.components.v1 as components
 
 st.set_page_config(layout="wide", page_title="Solar Shadow Study")
 
-# Suppress Streamlit chrome
+# Suppress Streamlit chrome and make the component fill the viewport.
+# Blank-page root cause: Streamlit wraps the custom component iframe in a
+# stVerticalBlock / stMainBlockContainer with inherent padding and sets the
+# iframe to a small initial height. We zero out all padding/margin and let
+# the iframe (which calls setFrameHeight(window.innerHeight)) grow to full
+# viewport height. Without this CSS, the component renders but is clipped to
+# the Streamlit default 150px or 0px.
 st.markdown("""
 <style>
+  /* Remove Streamlit chrome */
   #MainMenu, header, footer { display: none !important; }
-  .block-container { padding: 0 !important; margin: 0 !important; max-width: 100% !important; }
-  html, body, [data-testid="stAppViewContainer"], [data-testid="stMain"] {
-    height: 100vh; overflow: hidden; padding: 0; margin: 0;
+
+  /* Zero out all Streamlit layout padding */
+  html, body { height: 100vh; width: 100vw; overflow: hidden; padding: 0; margin: 0; }
+  [data-testid="stAppViewContainer"],
+  [data-testid="stMain"],
+  [data-testid="stMainBlockContainer"],
+  [data-testid="stVerticalBlock"],
+  [data-testid="stVerticalBlockBorderWrapper"],
+  .block-container,
+  section.main > div {
+    padding: 0 !important;
+    margin: 0 !important;
+    max-width: 100% !important;
+    height: 100vh !important;
+    overflow: hidden !important;
+  }
+
+  /* Make the custom component iframe fill the full viewport */
+  iframe[title="solar_shadow_app"] {
+    width: 100vw !important;
+    height: 100vh !important;
+    border: none !important;
+    display: block !important;
   }
 </style>
 """, unsafe_allow_html=True)

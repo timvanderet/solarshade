@@ -242,6 +242,70 @@ function genId() {
   return "id-" + Math.random().toString(36).slice(2, 10);
 }
 
+// Degrees to radians
+function toRad(d) { return d * Math.PI / 180; }
+
+// Convert GPS corners to local-meter XY (equirectangular, origin = corners[0])
+function gpsToLocal(lat, lon, originLat, originLon) {
+  const R = 6371000;
+  const x = toRad(lon - originLon) * R * Math.cos(toRad(originLat));
+  const y = toRad(lat - originLat) * R;
+  return [x, y];
+}
+
+// Compute panel metadata (azimuth, area, dims) from 4 GPS corners.
+// Mirrors the Python panels.py logic for immediate frontend display.
+// Azimuth convention: perpendicular to the long axis, in southern semicircle (90,270].
+function computePanelMeta(corners) {
+  if (!corners || corners.length !== 4) return null;
+  const origin = corners[0];
+  const local = corners.map(([lat, lon]) => gpsToLocal(lat, lon, origin[0], origin[1]));
+
+  // Shoelace area (in m²)
+  let area = 0;
+  for (let i = 0; i < 4; i++) {
+    const [x0, y0] = local[i];
+    const [x1, y1] = local[(i + 1) % 4];
+    area += x0 * y1 - x1 * y0;
+  }
+  area = Math.abs(area) / 2;
+
+  // Edge lengths and bearings
+  const edges = local.map((pt, i) => {
+    const nxt = local[(i + 1) % 4];
+    const dx = nxt[0] - pt[0], dy = nxt[1] - pt[1];
+    const len = Math.sqrt(dx * dx + dy * dy);
+    // bearing in degrees from north (0=N, 90=E, 180=S, 270=W)
+    const bearing = (Math.atan2(dx, dy) * 180 / Math.PI + 360) % 360;
+    return { len, bearing };
+  });
+
+  // Identify long-axis pair (0+2 vs 1+3)
+  const pair02 = edges[0].len + edges[2].len;
+  const pair13 = edges[1].len + edges[3].len;
+  const longBearing = pair02 >= pair13 ? edges[0].bearing : edges[1].bearing;
+
+  // Panel azimuth is perpendicular to long axis, in southern semicircle (90,270]
+  const cand1 = (longBearing + 90) % 360;
+  const cand2 = (longBearing - 90 + 360) % 360;
+  const inSouthern = (b) => b > 90 && b <= 270;
+  let azimuth;
+  if (inSouthern(cand1) && !inSouthern(cand2)) azimuth = cand1;
+  else if (inSouthern(cand2) && !inSouthern(cand1)) azimuth = cand2;
+  else azimuth = Math.abs(cand1 - 270) <= Math.abs(cand2 - 270) ? cand1 : cand2;
+
+  // Approximate width x length
+  const widthM = (edges[0].len + edges[2].len) / 2;
+  const heightM = (edges[1].len + edges[3].len) / 2;
+
+  return {
+    azimuth: Math.round(azimuth * 10) / 10,
+    area: Math.round(area * 10) / 10,
+    widthM: Math.round(widthM * 10) / 10,
+    heightM: Math.round(heightM * 10) / 10,
+  };
+}
+
 function ensureClockwise(corners) {
   // Shoelace formula sign
   let area = 0;
@@ -274,6 +338,7 @@ function SolarShadowApp({ args }) {
   const pendingCornersRef = useRef([]);
   const pendingMarkersRef = useRef([]);
   const treeMarkersRef = useRef({});
+  const pendingMarkerRef = useRef(null); // Fix 3: live-update marker for pending tree
   const heatmapOverlayRef = useRef(null);
   const searchContainerRef = useRef(null);
   const canvasOverlayRef = useRef(null);
@@ -287,7 +352,7 @@ function SolarShadowApp({ args }) {
   const [pendingTree, setPendingTree] = useState(null);
   const [validationError, setValidationError] = useState(null);
   const [activeTab, setActiveTab] = useState("monthly");
-  const [year] = useState(2025);
+  const [year, setYear] = useState(2025);
   const [importError, setImportError] = useState(null);
 
   // Set iframe height
@@ -324,20 +389,23 @@ function SolarShadowApp({ args }) {
     });
     mapInstanceRef.current = map;
 
-    // Place autocomplete
+    // Place autocomplete — use PlaceAutocompleteElement (non-deprecated)
+    // Listen for gmp-placeselect, fetch location + viewport fields,
+    // then pan/zoom using the modern place.location / place.viewport API.
     if (searchContainerRef.current) {
       window.google.maps.importLibrary("places").then(({ PlaceAutocompleteElement }) => {
         const ac = new PlaceAutocompleteElement();
         ac.style.width = "100%";
         searchContainerRef.current.appendChild(ac);
-        ac.addEventListener("gmp-placeselect", (e) => {
+        ac.addEventListener("gmp-placeselect", async (e) => {
           const place = e.place;
-          place.fetchFields({ fields: ["geometry"] }).then(() => {
-            if (place.geometry?.location) {
-              map.panTo(place.geometry.location);
-              map.setZoom(19);
-            }
-          });
+          await place.fetchFields({ fields: ["location", "viewport"] });
+          if (place.viewport) {
+            map.fitBounds(place.viewport);
+          } else if (place.location) {
+            map.panTo(place.location);
+            map.setZoom(19);
+          }
         });
       });
     }
@@ -422,6 +490,36 @@ function SolarShadowApp({ args }) {
     window.google.maps.event.addListener(poly.getPath(), "set_at", updateCorners);
     window.google.maps.event.addListener(poly.getPath(), "insert_at", updateCorners);
   }
+
+  // Fix 3: Sync pending tree marker live as lat/lon are edited
+  useEffect(() => {
+    const map = mapInstanceRef.current;
+    if (!map || !window.google) return;
+    if (!pendingTree) {
+      if (pendingMarkerRef.current) {
+        pendingMarkerRef.current.setMap(null);
+        pendingMarkerRef.current = null;
+      }
+      return;
+    }
+    if (pendingMarkerRef.current) {
+      pendingMarkerRef.current.setPosition({ lat: pendingTree.lat, lng: pendingTree.lon });
+    } else {
+      pendingMarkerRef.current = new window.google.maps.Marker({
+        position: { lat: pendingTree.lat, lng: pendingTree.lon },
+        map,
+        title: pendingTree.name,
+        icon: {
+          path: window.google.maps.SymbolPath.CIRCLE,
+          scale: 7,
+          fillColor: "#fbbf24",
+          fillOpacity: 0.9,
+          strokeColor: "#fff",
+          strokeWeight: 2,
+        },
+      });
+    }
+  }, [pendingTree, mapLoaded]);
 
   // Sync tree markers
   useEffect(() => {
@@ -561,6 +659,11 @@ function SolarShadowApp({ args }) {
 
   function confirmPendingTree() {
     if (!pendingTree) return;
+    // Remove the temporary pending marker — the trees sync effect will create the real one
+    if (pendingMarkerRef.current) {
+      pendingMarkerRef.current.setMap(null);
+      pendingMarkerRef.current = null;
+    }
     setTrees((prev) => [...prev, pendingTree]);
     setPendingTree(null);
   }
@@ -637,6 +740,8 @@ function SolarShadowApp({ args }) {
         if (mapInstanceRef.current) drawPolygon(corners, mapInstanceRef.current);
         setPanelTilt(String(cfg.panelTiltDeg));
         setTrees(cfg.trees || []);
+        // Fix 2: restore year from imported config so Run Analysis uses it
+        if (typeof cfg.year === "number") setYear(cfg.year);
         setImportError(null);
       } catch (err) {
         setImportError("Import failed: " + err.message);
@@ -654,11 +759,23 @@ function SolarShadowApp({ args }) {
     );
   }
 
-  // ── Panel metadata ────────────────────────────────────────────────────────
+  // ── Panel metadata (Fix 4) ───────────────────────────────────────────────
+  // Compute immediately from drawn corners so values appear without a backend run.
+  // After analysis, backend results take precedence.
+  const localMeta = computePanelMeta(panelCorners);
   const panelMeta = results
     ? {
         azimuth: results.panel_azimuth_deg?.toFixed(1),
         area: results.panel_area_m2?.toFixed(1),
+        widthM: null,
+        heightM: null,
+      }
+    : localMeta
+    ? {
+        azimuth: localMeta.azimuth.toFixed(1),
+        area: localMeta.area.toFixed(1),
+        widthM: localMeta.widthM.toFixed(1),
+        heightM: localMeta.heightM.toFixed(1),
       }
     : null;
 
@@ -699,16 +816,18 @@ function SolarShadowApp({ args }) {
                 {panelCorners ? "Redraw Panel" : "Draw Panel Footprint"}
               </button>
             )}
-            {panelCorners && (
+            {panelCorners && panelMeta && (
               <div style={{ marginBottom: 8 }}>
                 <div style={S.panelMeta}>
-                  {results ? (
-                    <>
-                      <div><b>Azimuth:</b> {results.panel_azimuth_deg?.toFixed(1)}°</div>
-                      <div><b>Area:</b> {results.panel_area_m2?.toFixed(1)} m²</div>
-                    </>
-                  ) : (
-                    <div style={{ color: "#64748b" }}>Panel drawn — run analysis to compute metrics</div>
+                  <div><b>Azimuth:</b> {panelMeta.azimuth}°</div>
+                  <div><b>Area:</b> {panelMeta.area} m²</div>
+                  {panelMeta.widthM && panelMeta.heightM && (
+                    <div><b>Dims:</b> ~{panelMeta.widthM} × {panelMeta.heightM} m</div>
+                  )}
+                  {!results && (
+                    <div style={{ color: "#94a3b8", fontSize: 11, marginTop: 4 }}>
+                      Estimated — run analysis for exact values
+                    </div>
                   )}
                 </div>
               </div>
@@ -864,6 +983,25 @@ function PendingTreeForm({ tree, onChange, onConfirm, onCancel }) {
         <label style={S.label}>Name</label>
         <input style={{ ...S.input, marginBottom: 6 }} value={tree.name}
           onChange={(e) => onChange("name", e.target.value)} />
+        {/* Fix 3: lat/lon inputs — editing moves the marker live */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 6 }}>
+          <div>
+            <label style={S.label}>Latitude</label>
+            <input style={S.input} type="number" step="0.000001" value={tree.lat}
+              onChange={(e) => {
+                const v = parseFloat(e.target.value);
+                if (!isNaN(v)) onChange("lat", v);
+              }} />
+          </div>
+          <div>
+            <label style={S.label}>Longitude</label>
+            <input style={S.input} type="number" step="0.000001" value={tree.lon}
+              onChange={(e) => {
+                const v = parseFloat(e.target.value);
+                if (!isNaN(v)) onChange("lon", v);
+              }} />
+          </div>
+        </div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 6 }}>
           <div>
             <label style={S.label}>Height (m)</label>
@@ -923,6 +1061,25 @@ function TreeCard({ tree, expanded, onToggle, onChange, onDelete }) {
           <label style={S.label}>Name</label>
           <input style={{ ...S.input, marginBottom: 6 }} value={tree.name}
             onChange={(e) => onChange("name", e.target.value)} />
+          {/* Fix 3: lat/lon inputs in expanded editor — marker moves live via trees state sync */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 6 }}>
+            <div>
+              <label style={S.label}>Latitude</label>
+              <input style={S.input} type="number" step="0.000001" value={tree.lat}
+                onChange={(e) => {
+                  const v = parseFloat(e.target.value);
+                  if (!isNaN(v)) onChange("lat", v);
+                }} />
+            </div>
+            <div>
+              <label style={S.label}>Longitude</label>
+              <input style={S.input} type="number" step="0.000001" value={tree.lon}
+                onChange={(e) => {
+                  const v = parseFloat(e.target.value);
+                  if (!isNaN(v)) onChange("lon", v);
+                }} />
+            </div>
+          </div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 6 }}>
             <div>
               <label style={S.label}>Height (m)</label>

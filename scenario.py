@@ -237,3 +237,92 @@ def run_heatmap_grid(
             })
 
     return results
+
+
+# ── Sample scenario / smoke test ─────────────────────────────────────────────
+#
+# Tree placement note:
+# The panel is near Glen Ellen, CA (lat ~38.3844, Northern Hemisphere).
+# The sun is always to the SOUTH, so shadows fall NORTHWARD.
+# Trees must be placed SOUTH of the panel to cast shadows onto it.
+# Original sample had trees north of the panel (lat > centroid), so their
+# shadows extended further north and never intersected the panel footprint.
+# The corrected positions place both trees south of the panel.
+#
+# Expected results:
+#   - Evergreen (Oak A) should contribute MORE shadow than deciduous (Maple B)
+#     because Maple B loses all shadow during the leaf-off season
+#     (Oct 15 – Mar 14), which covers roughly 5 months of winter when the
+#     sun is low and shadows are long and most damaging.
+#   - Irradiance-weighted shading should be lower than raw-hours shading
+#     because peak-irradiance hours coincide with high sun elevation and
+#     shorter (but more focused) shadows.
+
+if __name__ == "__main__":
+    panel_corners = [
+        (38.384388, -122.552374),
+        (38.384408, -122.552275),
+        (38.384440, -122.552290),
+        (38.384422, -122.552385),
+    ]
+
+    panel_tilt_deg = 22.0
+
+    # Trees placed SOUTH of the panel so their northward shadows hit the panel.
+    # Centroid is approx (38.384415, -122.552331).
+    # Oak A: ~20m south, ~5m east of centroid.
+    # Maple B: ~12m south, directly south of centroid.
+    # At these distances, both trees cast shadows that reach the panel at low sun
+    # angles (winter noon elevation ~28°). The Oak shadow is longer due to greater
+    # height, and the Maple loses shadow entirely during leaf-off (Oct 15–Mar 14),
+    # which includes the peak-shadow winter months. This makes Oak A the dominant
+    # contributor, satisfying the spec validation target.
+    trees = [
+        {
+            "id": "tree-1",
+            "name": "Oak A",
+            "lat": 38.384235,
+            "lon": -122.552274,
+            "height_m": 10.0,
+            "canopy_radius_m": 3.0,
+            "shape": "cylinder",
+            "deciduous": False,
+        },
+        {
+            "id": "tree-2",
+            "name": "Maple B",
+            "lat": 38.384307,
+            "lon": -122.552331,
+            "height_m": 8.0,
+            "canopy_radius_m": 2.0,
+            "shape": "cylinder",
+            "deciduous": True,
+        },
+    ]
+
+    results = run_scenario(panel_corners, panel_tilt_deg, trees, year=2025)
+
+    print("=" * 50)
+    print("SOLAR SHADOW STUDY - Sample Scenario Results")
+    print("=" * 50)
+    print(f"Panel azimuth:       {results['panel_azimuth_deg']:.1f}°")
+    print(f"Panel area:          {results['panel_area_m2']:.1f} m²")
+    print(f"Total daylight hrs:  {results['total_daylight_hours']}")
+    print()
+    print(f"Annual irradiance-weighted shading: {results['annual_shade_pct_irradiance']:.2f}%")
+    print(f"Annual raw-hours shading:           {results['annual_shade_pct_raw']:.2f}%")
+    print()
+    print("Per-tree breakdown:")
+    for t in results["per_tree"]:
+        print(f"  {t['name']:10s} irr={t['shade_pct_irradiance']:.3f}%  raw={t['shade_pct_raw']:.3f}%")
+
+    # Validations
+    oak = next(t for t in results["per_tree"] if t["name"] == "Oak A")
+    maple = next(t for t in results["per_tree"] if t["name"] == "Maple B")
+
+    print()
+    print("Validation checks:")
+    irr_lt_raw = results["annual_shade_pct_irradiance"] < results["annual_shade_pct_raw"]
+    oak_gt_maple = oak["shade_pct_irradiance"] > maple["shade_pct_irradiance"]
+    print(f"  Irradiance < raw hours:        {'PASS' if irr_lt_raw else 'FAIL'}")
+    print(f"  Oak (evergreen) > Maple (dec): {'PASS' if oak_gt_maple else 'FAIL'}")

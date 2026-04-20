@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState, useCallback } from "react";
-import { Streamlit, withStreamlitConnection } from "streamlit-component-lib";
+import { Streamlit } from "streamlit-component-lib";
 
 // ── Styles ──────────────────────────────────────────────────────────────────
 const S = {
@@ -321,7 +321,9 @@ function ensureClockwise(corners) {
 }
 
 // ── Main Component ───────────────────────────────────────────────────────────
-function SolarShadeApp({ args }) {
+function SolarShadeApp() {
+  // Receive args from Streamlit via render events; render immediately with defaults.
+  const [streamlitArgs, setStreamlitArgs] = useState({});
   const {
     google_maps_api_key: apiKey = "",
     results = null,
@@ -330,7 +332,7 @@ function SolarShadeApp({ args }) {
     heatmap_status: heatmapStatus = "idle",
     last_processed_request_id: lastProcessedId = null,
     error: serverError = null,
-  } = args || {};
+  } = streamlitArgs;
 
   const mapRef = useRef(null);
   const mapInstanceRef = useRef(null);
@@ -355,13 +357,24 @@ function SolarShadeApp({ args }) {
   const [year, setYear] = useState(2025);
   const [importError, setImportError] = useState(null);
 
-  // Set iframe height
+  // Connect to Streamlit and set iframe height
   useEffect(() => {
+    // Update state whenever Streamlit sends new props
+    const onRender = (event) => {
+      setStreamlitArgs(event.detail?.args || {});
+    };
+    Streamlit.events.addEventListener(Streamlit.RENDER_EVENT, onRender);
+
     const setHeight = () => Streamlit.setFrameHeight(window.innerHeight);
     setHeight();
     window.addEventListener("resize", setHeight);
+    // Signal ready — Streamlit will respond with a RENDER event containing args
     Streamlit.setComponentReady();
-    return () => window.removeEventListener("resize", setHeight);
+
+    return () => {
+      Streamlit.events.removeEventListener(Streamlit.RENDER_EVENT, onRender);
+      window.removeEventListener("resize", setHeight);
+    };
   }, []);
 
   // Load Google Maps
@@ -1142,4 +1155,4 @@ function PlotlyEmbed({ figJson }) {
   return <iframe ref={ref} style={{ width: "100%", height: 280, border: "none" }} title="chart" />;
 }
 
-export default withStreamlitConnection(SolarShadeApp);
+export default SolarShadeApp;

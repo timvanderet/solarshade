@@ -1,5 +1,9 @@
-import React, { useEffect, useRef, useState, useCallback } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Streamlit } from "streamlit-component-lib";
+
+// Unit conversion
+const M_TO_FT = 3.28084;
+const FT_TO_M = 0.3048;
 
 // ── Styles ──────────────────────────────────────────────────────────────────
 const S = {
@@ -78,11 +82,6 @@ const S = {
     color: "#334155",
     border: "1px solid #e2e8f0",
   },
-  btnActive: {
-    background: "#fef3c7",
-    color: "#92400e",
-    border: "1px solid #fcd34d",
-  },
   btnDanger: {
     background: "#fee2e2",
     color: "#991b1b",
@@ -105,11 +104,6 @@ const S = {
     fontWeight: 500,
     color: "#64748b",
     marginBottom: 4,
-  },
-  row: {
-    display: "flex",
-    gap: 8,
-    alignItems: "center",
   },
   treeCard: {
     background: "#f8fafc",
@@ -251,6 +245,7 @@ function gpsToLocal(lat, lon, originLat, originLon) {
   return [x, y];
 }
 
+// Returns area in m², dims in m
 function computePanelMeta(corners) {
   if (!corners || corners.length !== 4) return null;
   const origin = corners[0];
@@ -289,9 +284,12 @@ function computePanelMeta(corners) {
 
   return {
     azimuth: Math.round(azimuth * 10) / 10,
-    area: Math.round(area * 10) / 10,
-    widthM: Math.round(widthM * 10) / 10,
-    heightM: Math.round(heightM * 10) / 10,
+    area,           // m²
+    widthM,         // m
+    heightM,        // m
+    areaFt2: area * M_TO_FT * M_TO_FT,
+    widthFt: widthM * M_TO_FT,
+    heightFt: heightM * M_TO_FT,
   };
 }
 
@@ -307,6 +305,36 @@ function ensureClockwise(corners) {
   return corners;
 }
 
+// Chevron indicator for expandable cards
+function Chevron({ expanded }) {
+  return (
+    <span style={{
+      fontSize: 10,
+      color: "#94a3b8",
+      display: "inline-block",
+      transform: expanded ? "rotate(90deg)" : "rotate(0deg)",
+      transition: "transform 0.15s ease",
+      lineHeight: 1,
+    }}>▶</span>
+  );
+}
+
+// Spinner for loading state
+function Spinner() {
+  return (
+    <span style={{
+      display: "inline-block",
+      width: 13,
+      height: 13,
+      border: "2px solid rgba(255,255,255,0.35)",
+      borderTopColor: "#fff",
+      borderRadius: "50%",
+      animation: "sspin 0.75s linear infinite",
+      flexShrink: 0,
+    }} />
+  );
+}
+
 // ── Main Component ───────────────────────────────────────────────────────────
 function SolarShadeApp() {
   const [streamlitArgs, setStreamlitArgs] = useState({});
@@ -316,43 +344,40 @@ function SolarShadeApp() {
     charts = null,
     heatmap_grid: heatmapGrid = null,
     heatmap_status: heatmapStatus = "idle",
-    last_processed_request_id: lastProcessedId = null,
     error: serverError = null,
   } = streamlitArgs;
 
   const mapRef = useRef(null);
   const mapInstanceRef = useRef(null);
-  const panelPolygonsRef = useRef({});   // panelId → Polygon
+  const panelPolygonsRef = useRef({});
   const pendingCornersRef = useRef([]);
   const pendingMarkersRef = useRef([]);
   const treeMarkersRef = useRef({});
   const pendingMarkerRef = useRef(null);
-  const heatmapOverlayRef = useRef(null);
-  const searchContainerRef = useRef(null);
   const canvasOverlayRef = useRef(null);
+  const searchContainerRef = useRef(null);
 
   const [mapLoaded, setMapLoaded] = useState(false);
-  const [mode, setMode] = useState("idle"); // idle | drawPanel | placeTree
+  const [mode, setMode] = useState("idle");
   const [pendingCount, setPendingCount] = useState(0);
 
-  // Multi-panel state
-  const [panels, setPanels] = useState([]); // [{id, name, corners, tilt_deg, height_m}]
+  const [panels, setPanels] = useState([]);
   const [drawingPanelId, setDrawingPanelId] = useState(null);
   const [expandedPanel, setExpandedPanel] = useState(null);
 
   const [trees, setTrees] = useState([]);
   const [expandedTree, setExpandedTree] = useState(null);
   const [pendingTree, setPendingTree] = useState(null);
+
   const [validationError, setValidationError] = useState(null);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [activeTab, setActiveTab] = useState("monthly");
-  const [year, setYear] = useState(2025);
+  const [year] = useState(2025);
   const [importError, setImportError] = useState(null);
 
-  // Connect to Streamlit
+  // ── Streamlit bridge ──────────────────────────────────────────────────────
   useEffect(() => {
-    const onRender = (event) => {
-      setStreamlitArgs(event.detail?.args || {});
-    };
+    const onRender = (event) => setStreamlitArgs(event.detail?.args || {});
     Streamlit.events.addEventListener(Streamlit.RENDER_EVENT, onRender);
     Streamlit.setComponentReady();
     const t1 = setTimeout(() => Streamlit.setComponentReady(), 150);
@@ -368,7 +393,12 @@ function SolarShadeApp() {
     };
   }, []);
 
-  // Load Google Maps
+  // Stop analyzing spinner when results or error arrive
+  useEffect(() => {
+    if (results !== null || serverError !== null) setIsAnalyzing(false);
+  }, [results, serverError]);
+
+  // ── Google Maps ───────────────────────────────────────────────────────────
   useEffect(() => {
     if (!apiKey || window._googleMapsLoading) return;
     if (window.google?.maps?.Map) { setMapLoaded(true); return; }
@@ -380,7 +410,6 @@ function SolarShadeApp() {
     document.head.appendChild(script);
   }, [apiKey]);
 
-  // Init map
   useEffect(() => {
     if (!mapLoaded || !mapRef.current || mapInstanceRef.current) return;
     const map = new window.google.maps.Map(mapRef.current, {
@@ -402,26 +431,21 @@ function SolarShadeApp() {
         "color:#1e293b", "background:#fff", "outline:none", "box-sizing:border-box",
       ].join(";");
       searchContainerRef.current.appendChild(input);
-      const ac = new window.google.maps.places.Autocomplete(input, {
-        fields: ["geometry", "name"],
-      });
+      const ac = new window.google.maps.places.Autocomplete(input, { fields: ["geometry", "name"] });
       ac.addListener("place_changed", () => {
         const place = ac.getPlace();
-        if (place.geometry?.viewport) {
-          map.fitBounds(place.geometry.viewport);
-        } else if (place.geometry?.location) {
-          map.panTo(place.geometry.location);
-          map.setZoom(19);
-        }
+        if (place.geometry?.viewport) map.fitBounds(place.geometry.viewport);
+        else if (place.geometry?.location) { map.panTo(place.geometry.location); map.setZoom(19); }
       });
     }
   }, [mapLoaded]);
 
-  // Cursor: crosshair when drawing or placing
+  // Crosshair cursor when drawing or placing
   useEffect(() => {
     if (!mapInstanceRef.current) return;
-    const cursor = (mode === "drawPanel" || mode === "placeTree") ? "crosshair" : "";
-    mapInstanceRef.current.setOptions({ draggableCursor: cursor });
+    mapInstanceRef.current.setOptions({
+      draggableCursor: (mode === "drawPanel" || mode === "placeTree") ? "crosshair" : "",
+    });
   }, [mode, mapLoaded]);
 
   // Map click handler
@@ -429,34 +453,22 @@ function SolarShadeApp() {
     if (!mapInstanceRef.current) return;
     const map = mapInstanceRef.current;
     const listener = map.addListener("click", (e) => {
-      const { latLng } = e;
-      const lat = latLng.lat(), lng = latLng.lng();
-
+      const lat = e.latLng.lat(), lng = e.latLng.lng();
       if (mode === "drawPanel" && drawingPanelId) {
         const corners = [...pendingCornersRef.current, [lat, lng]];
         pendingCornersRef.current = corners;
         setPendingCount(corners.length);
-
         const marker = new window.google.maps.Marker({
-          position: { lat, lng },
-          map,
-          icon: {
-            path: window.google.maps.SymbolPath.CIRCLE,
-            scale: 5,
-            fillColor: "#f59e0b",
-            fillOpacity: 1,
-            strokeColor: "#fff",
-            strokeWeight: 2,
-          },
+          position: { lat, lng }, map,
+          icon: { path: window.google.maps.SymbolPath.CIRCLE, scale: 5,
+            fillColor: "#f59e0b", fillOpacity: 1, strokeColor: "#fff", strokeWeight: 2 },
         });
         pendingMarkersRef.current.push(marker);
-
         if (corners.length === 4) {
           pendingMarkersRef.current.forEach((m) => m.setMap(null));
           pendingMarkersRef.current = [];
           pendingCornersRef.current = [];
           setPendingCount(0);
-
           const ordered = ensureClockwise(corners);
           const pid = drawingPanelId;
           setPanels((prev) => prev.map((p) => p.id === pid ? { ...p, corners: ordered } : p));
@@ -466,14 +478,9 @@ function SolarShadeApp() {
         }
       } else if (mode === "placeTree") {
         setPendingTree({
-          id: genId(),
-          name: `Tree ${trees.length + 1}`,
-          lat,
-          lon: lng,
-          height_m: 10,
-          canopy_radius_m: 3,
-          shape: "cylinder",
-          deciduous: false,
+          id: genId(), name: `Tree ${trees.length + 1}`,
+          lat, lon: lng, height_ft: "30", canopy_radius_ft: "10",
+          shape: "cylinder", deciduous: false,
         });
         setMode("idle");
       }
@@ -482,122 +489,78 @@ function SolarShadeApp() {
   }, [mapLoaded, mode, drawingPanelId, trees.length]);
 
   function drawPanelPolygon(panelId, corners, map) {
-    if (panelPolygonsRef.current[panelId]) {
-      panelPolygonsRef.current[panelId].setMap(null);
-    }
+    if (panelPolygonsRef.current[panelId]) panelPolygonsRef.current[panelId].setMap(null);
     const path = corners.map(([lat, lng]) => ({ lat, lng }));
     const poly = new window.google.maps.Polygon({
-      paths: path,
-      strokeColor: "#f59e0b",
-      strokeOpacity: 1,
-      strokeWeight: 2,
-      fillColor: "#fef9c3",
-      fillOpacity: 0.35,
-      editable: true,
-      draggable: false,
-      map,
+      paths: path, strokeColor: "#f59e0b", strokeOpacity: 1, strokeWeight: 2,
+      fillColor: "#fef9c3", fillOpacity: 0.35, editable: true, draggable: false, map,
     });
     panelPolygonsRef.current[panelId] = poly;
-
-    const updateCorners = () => {
+    const pid = panelId;
+    const update = () => {
       const pts = poly.getPath().getArray().map((p) => [p.lat(), p.lng()]);
-      const pid = panelId;
       setPanels((prev) => prev.map((p) => p.id === pid ? { ...p, corners: ensureClockwise(pts) } : p));
     };
-    window.google.maps.event.addListener(poly.getPath(), "set_at", updateCorners);
-    window.google.maps.event.addListener(poly.getPath(), "insert_at", updateCorners);
+    window.google.maps.event.addListener(poly.getPath(), "set_at", update);
+    window.google.maps.event.addListener(poly.getPath(), "insert_at", update);
   }
 
-  // Sync pending tree marker
+  // Pending tree marker
   useEffect(() => {
     const map = mapInstanceRef.current;
     if (!map || !window.google) return;
     if (!pendingTree) {
-      if (pendingMarkerRef.current) {
-        pendingMarkerRef.current.setMap(null);
-        pendingMarkerRef.current = null;
-      }
+      if (pendingMarkerRef.current) { pendingMarkerRef.current.setMap(null); pendingMarkerRef.current = null; }
       return;
     }
     if (pendingMarkerRef.current) {
       pendingMarkerRef.current.setPosition({ lat: pendingTree.lat, lng: pendingTree.lon });
     } else {
       pendingMarkerRef.current = new window.google.maps.Marker({
-        position: { lat: pendingTree.lat, lng: pendingTree.lon },
-        map,
-        title: pendingTree.name,
-        icon: {
-          path: window.google.maps.SymbolPath.CIRCLE,
-          scale: 7,
-          fillColor: "#fbbf24",
-          fillOpacity: 0.9,
-          strokeColor: "#fff",
-          strokeWeight: 2,
-        },
+        position: { lat: pendingTree.lat, lng: pendingTree.lon }, map, title: pendingTree.name,
+        icon: { path: window.google.maps.SymbolPath.CIRCLE, scale: 7,
+          fillColor: "#fbbf24", fillOpacity: 0.9, strokeColor: "#fff", strokeWeight: 2 },
       });
     }
   }, [pendingTree, mapLoaded]);
 
-  // Sync tree markers
+  // Tree markers sync
   useEffect(() => {
     if (!mapInstanceRef.current) return;
     const map = mapInstanceRef.current;
-    const currentIds = new Set(trees.map((t) => t.id));
+    const ids = new Set(trees.map((t) => t.id));
     Object.entries(treeMarkersRef.current).forEach(([id, m]) => {
-      if (!currentIds.has(id)) { m.setMap(null); delete treeMarkersRef.current[id]; }
+      if (!ids.has(id)) { m.setMap(null); delete treeMarkersRef.current[id]; }
     });
     trees.forEach((tree) => {
       if (treeMarkersRef.current[tree.id]) {
         treeMarkersRef.current[tree.id].setPosition({ lat: tree.lat, lng: tree.lon });
       } else {
-        const marker = new window.google.maps.Marker({
-          position: { lat: tree.lat, lng: tree.lon },
-          map,
-          title: tree.name,
-          icon: {
-            path: window.google.maps.SymbolPath.CIRCLE,
-            scale: 7,
+        treeMarkersRef.current[tree.id] = new window.google.maps.Marker({
+          position: { lat: tree.lat, lng: tree.lon }, map, title: tree.name,
+          icon: { path: window.google.maps.SymbolPath.CIRCLE, scale: 7,
             fillColor: tree.deciduous ? "#86efac" : "#166534",
-            fillOpacity: 0.9,
-            strokeColor: "#fff",
-            strokeWeight: 2,
-          },
+            fillOpacity: 0.9, strokeColor: "#fff", strokeWeight: 2 },
         });
-        treeMarkersRef.current[tree.id] = marker;
       }
     });
   }, [trees, mapLoaded]);
 
-  // Planting-impact heatmap overlay
+  // Planting-impact heatmap
   useEffect(() => {
     const map = mapInstanceRef.current;
     if (!map || !window.google) return;
-    if (canvasOverlayRef.current) {
-      canvasOverlayRef.current.setMap(null);
-      canvasOverlayRef.current = null;
-    }
+    if (canvasOverlayRef.current) { canvasOverlayRef.current.setMap(null); canvasOverlayRef.current = null; }
     if (!heatmapGrid || heatmapGrid.length === 0) return;
-
     const maxShade = Math.max(...heatmapGrid.map((p) => p.shade_pct), 0.001);
     if (maxShade === 0) return;
 
     function heatColor(t) {
-      const stops = [
-        [254, 240, 217, 0],
-        [253, 187, 132, 100],
-        [252, 141, 89, 160],
-        [227, 74, 51, 200],
-        [179, 0, 0, 220],
-      ];
+      const stops = [[254,240,217,0],[253,187,132,100],[252,141,89,160],[227,74,51,200],[179,0,0,220]];
       const idx = Math.min(Math.floor(t * (stops.length - 1)), stops.length - 2);
       const frac = t * (stops.length - 1) - idx;
       const a = stops[idx], b = stops[idx + 1];
-      return [
-        Math.round(a[0] + frac * (b[0] - a[0])),
-        Math.round(a[1] + frac * (b[1] - a[1])),
-        Math.round(a[2] + frac * (b[2] - a[2])),
-        Math.round(a[3] + frac * (b[3] - a[3])),
-      ];
+      return [0,1,2,3].map((i) => Math.round(a[i] + frac * (b[i] - a[i])));
     }
 
     class HeatOverlay extends window.google.maps.OverlayView {
@@ -613,16 +576,13 @@ function SolarShadeApp() {
         let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
         const pts = this.data.map((d) => {
           const p = proj.fromLatLngToDivPixel(new window.google.maps.LatLng(d.lat, d.lon));
-          if (p.x < minX) minX = p.x;
-          if (p.y < minY) minY = p.y;
-          if (p.x > maxX) maxX = p.x;
-          if (p.y > maxY) maxY = p.y;
+          minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
+          maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y);
           return { x: p.x, y: p.y, v: d.shade_pct };
         });
         const pad = 30;
-        const W = maxX - minX + pad * 2, H = maxY - minY + pad * 2;
-        this.canvas.width = Math.max(1, Math.round(W));
-        this.canvas.height = Math.max(1, Math.round(H));
+        this.canvas.width = Math.max(1, Math.round(maxX - minX + pad * 2));
+        this.canvas.height = Math.max(1, Math.round(maxY - minY + pad * 2));
         this.canvas.style.left = (minX - pad) + "px";
         this.canvas.style.top = (minY - pad) + "px";
         const ctx = this.canvas.getContext("2d");
@@ -637,7 +597,7 @@ function SolarShadeApp() {
           ctx.fill();
         }
       }
-      onRemove() { if (this.canvas && this.canvas.parentNode) this.canvas.parentNode.removeChild(this.canvas); }
+      onRemove() { if (this.canvas?.parentNode) this.canvas.parentNode.removeChild(this.canvas); }
     }
 
     const overlay = new HeatOverlay(heatmapGrid, maxShade);
@@ -649,11 +609,8 @@ function SolarShadeApp() {
 
   function addPanel() {
     const newPanel = {
-      id: genId(),
-      name: `Panel ${panels.length + 1}`,
-      corners: null,
-      tilt_deg: "22",
-      height_m: "1.0",
+      id: genId(), name: `Panel ${panels.length + 1}`,
+      corners: null, tilt_deg: "22", height_ft: "0",
     };
     pendingCornersRef.current = [];
     pendingMarkersRef.current.forEach((m) => m.setMap(null));
@@ -685,12 +642,10 @@ function SolarShadeApp() {
     }
     setPanels((prev) => prev.filter((p) => p.id !== id));
     if (drawingPanelId === id) {
-      setDrawingPanelId(null);
-      setMode("idle");
+      setDrawingPanelId(null); setMode("idle"); setPendingCount(0);
       pendingCornersRef.current = [];
       pendingMarkersRef.current.forEach((m) => m.setMap(null));
       pendingMarkersRef.current = [];
-      setPendingCount(0);
     }
   }
 
@@ -699,330 +654,305 @@ function SolarShadeApp() {
   }
 
   function cancelMode() {
-    setMode("idle");
-    setDrawingPanelId(null);
-    setPendingCount(0);
+    setMode("idle"); setDrawingPanelId(null); setPendingCount(0);
     pendingCornersRef.current = [];
     pendingMarkersRef.current.forEach((m) => m.setMap(null));
     pendingMarkersRef.current = [];
   }
 
-  function startPlaceTree() {
-    setMode("placeTree");
-  }
-
   function confirmPendingTree() {
     if (!pendingTree) return;
-    if (pendingMarkerRef.current) {
-      pendingMarkerRef.current.setMap(null);
-      pendingMarkerRef.current = null;
-    }
+    if (pendingMarkerRef.current) { pendingMarkerRef.current.setMap(null); pendingMarkerRef.current = null; }
     setTrees((prev) => [...prev, pendingTree]);
     setPendingTree(null);
   }
 
   function deleteTree(id) {
     setTrees((prev) => prev.filter((t) => t.id !== id));
-    if (treeMarkersRef.current[id]) {
-      treeMarkersRef.current[id].setMap(null);
-      delete treeMarkersRef.current[id];
-    }
+    if (treeMarkersRef.current[id]) { treeMarkersRef.current[id].setMap(null); delete treeMarkersRef.current[id]; }
   }
 
   function updateTree(id, field, value) {
-    setTrees((prev) =>
-      prev.map((t) => (t.id === id ? { ...t, [field]: value } : t))
-    );
+    setTrees((prev) => prev.map((t) => t.id === id ? { ...t, [field]: value } : t));
   }
 
   function runAnalysis() {
     setValidationError(null);
-    if (panels.length === 0) {
-      setValidationError("Add at least one panel footprint.");
-      return;
-    }
+    if (panels.length === 0) { setValidationError("Add at least one panel footprint."); return; }
     const undrawn = panels.filter((p) => !p.corners);
-    if (undrawn.length > 0) {
-      setValidationError(`Panel "${undrawn[0].name}" has no drawn footprint.`);
-      return;
-    }
+    if (undrawn.length > 0) { setValidationError(`"${undrawn[0].name}" has no drawn footprint.`); return; }
     for (const p of panels) {
       const tilt = parseFloat(p.tilt_deg);
-      if (isNaN(tilt) || tilt <= 0) {
-        setValidationError(`Panel "${p.name}": tilt must be a positive number.`);
-        return;
-      }
+      if (isNaN(tilt) || tilt <= 0) { setValidationError(`"${p.name}": tilt must be a positive number.`); return; }
     }
+    setIsAnalyzing(true);
     Streamlit.setComponentValue({
       run_analysis: true,
       analysis_request_id: genId(),
       year,
       panels: panels.map((p) => ({
-        id: p.id,
-        name: p.name,
-        corners: p.corners,
+        id: p.id, name: p.name, corners: p.corners,
         tilt_deg: parseFloat(p.tilt_deg),
-        height_m: parseFloat(p.height_m) || 1.0,
+        height_m: (parseFloat(p.height_ft) || 0) * FT_TO_M,
       })),
-      trees,
+      trees: trees.map((t) => ({
+        id: t.id, name: t.name, lat: t.lat, lon: t.lon,
+        height_m: (parseFloat(t.height_ft) || 30) * FT_TO_M,
+        canopy_radius_m: (parseFloat(t.canopy_radius_ft) || 10) * FT_TO_M,
+        shape: t.shape, deciduous: t.deciduous,
+      })),
     });
   }
 
   function exportConfig() {
     const config = {
-      version: "1.1.0",
-      year,
+      version: "1.2.0", year,
       panels: panels.map((p) => ({
-        id: p.id,
-        name: p.name,
-        corners: p.corners || [],
+        id: p.id, name: p.name, corners: p.corners || [],
         tilt_deg: parseFloat(p.tilt_deg) || 22,
-        height_m: parseFloat(p.height_m) || 1.0,
+        height_ft: parseFloat(p.height_ft) || 0,
       })),
-      trees,
+      trees: trees.map((t) => ({
+        id: t.id, name: t.name, lat: t.lat, lon: t.lon,
+        height_ft: parseFloat(t.height_ft) || 30,
+        canopy_radius_ft: parseFloat(t.canopy_radius_ft) || 10,
+        shape: t.shape, deciduous: t.deciduous,
+      })),
       exportedAt: new Date().toISOString(),
     };
     const blob = new Blob([JSON.stringify(config, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "solarshade-config.json";
-    a.click();
+    const a = document.createElement("a"); a.href = url; a.download = "solarshade-config.json"; a.click();
     URL.revokeObjectURL(url);
   }
 
   function importConfig(e) {
-    const file = e.target.files[0];
-    if (!file) return;
+    const file = e.target.files[0]; if (!file) return;
     const reader = new FileReader();
     reader.onload = (ev) => {
       try {
         const cfg = JSON.parse(ev.target.result);
+        const ver = cfg.version || "1.0.0";
+        const useFt = ver >= "1.2.0"; // 1.2.0+ stores feet
+
+        // Parse trees
+        const importedTrees = (cfg.trees || []).map((t) => ({
+          id: t.id || genId(), name: t.name || "Tree",
+          lat: t.lat, lon: t.lon,
+          height_ft: useFt
+            ? String(t.height_ft ?? 30)
+            : String(Math.round((t.height_m ?? 10) * M_TO_FT)),
+          canopy_radius_ft: useFt
+            ? String(t.canopy_radius_ft ?? 10)
+            : String(Math.round((t.canopy_radius_m ?? 3) * M_TO_FT)),
+          shape: t.shape || "cylinder",
+          deciduous: t.deciduous || false,
+        }));
+
+        // Parse panels
         let importedPanels;
         if (Array.isArray(cfg.panels) && cfg.panels.length > 0) {
-          // v1.1.0 multi-panel format
           importedPanels = cfg.panels.map((p) => ({
-            id: p.id || genId(),
-            name: p.name || "Panel",
+            id: p.id || genId(), name: p.name || "Panel",
             corners: Array.isArray(p.corners) && p.corners.length === 4
               ? ensureClockwise(p.corners) : null,
             tilt_deg: String(p.tilt_deg ?? 22),
-            height_m: String(p.height_m ?? 1.0),
+            height_ft: useFt
+              ? String(p.height_ft ?? 0)
+              : String(Math.round((p.height_m ?? 0) * M_TO_FT)),
           }));
         } else if (Array.isArray(cfg.panelCorners)) {
-          // v1.0.0 single-panel format
           if (cfg.panelCorners.length !== 4) throw new Error("panelCorners must have 4 corners");
           importedPanels = [{
-            id: genId(),
-            name: "Panel 1",
+            id: genId(), name: "Panel 1",
             corners: ensureClockwise(cfg.panelCorners),
             tilt_deg: String(cfg.panelTiltDeg ?? 22),
-            height_m: "1.0",
+            height_ft: "0",
           }];
         } else {
           throw new Error("Missing panels or panelCorners field");
         }
-        // Clear existing polygons
+
         Object.values(panelPolygonsRef.current).forEach((poly) => poly.setMap(null));
         panelPolygonsRef.current = {};
         setPanels(importedPanels);
         if (mapInstanceRef.current) {
-          importedPanels.forEach((p) => {
-            if (p.corners) drawPanelPolygon(p.id, p.corners, mapInstanceRef.current);
-          });
+          importedPanels.forEach((p) => { if (p.corners) drawPanelPolygon(p.id, p.corners, mapInstanceRef.current); });
         }
-        setTrees(cfg.trees || []);
-        if (typeof cfg.year === "number") setYear(cfg.year);
+        setTrees(importedTrees);
         setImportError(null);
-      } catch (err) {
-        setImportError("Import failed: " + err.message);
-      }
+      } catch (err) { setImportError("Import failed: " + err.message); }
     };
     reader.readAsText(file);
     e.target.value = "";
   }
 
-  // ── Chart rendering ───────────────────────────────────────────────────────
   function renderChart(figJson) {
     if (!figJson) return null;
     return <PlotlyEmbed figJson={figJson} key={figJson.slice(0, 40)} />;
   }
 
-  const modeLabel =
-    mode === "drawPanel"
-      ? `Click 4 corners… (${pendingCount}/4)`
-      : mode === "placeTree"
-      ? "Click map to place tree…"
-      : null;
+  const modeLabel = mode === "drawPanel"
+    ? `Click 4 corners… (${pendingCount}/4)`
+    : mode === "placeTree" ? "Click map to place tree…" : null;
 
   return (
-    <div style={S.root}>
-      {/* Sidebar */}
-      <div style={S.sidebar}>
-        <div style={S.sidebarHeader}>☀ SolarShade</div>
-        <div style={S.sidebarScroll}>
-          {/* Address search */}
-          <div style={S.section}>
-            <div style={S.sectionTitle}>Search Location</div>
-            <div ref={searchContainerRef} style={{ width: "100%" }} />
-          </div>
+    <>
+      <style>{`@keyframes sspin { to { transform: rotate(360deg); } }`}</style>
+      <div style={S.root}>
+        {/* Sidebar */}
+        <div style={S.sidebar}>
+          <div style={S.sidebarHeader}>☀ SolarShade</div>
+          <div style={S.sidebarScroll}>
 
-          {/* Panel Array */}
-          <div style={S.section}>
-            <div style={S.sectionTitle}>Panel Array</div>
-            {mode === "drawPanel" ? (
-              <div style={{ marginBottom: 8 }}>
-                <div style={S.infoBox}>{modeLabel}</div>
-                <button style={{ ...S.btn, ...S.btnDanger, width: "100%" }} onClick={cancelMode}>
-                  Cancel
-                </button>
-              </div>
-            ) : (
-              <button
-                style={{ ...S.btn, ...S.btnSecondary, width: "100%", marginBottom: 8 }}
-                onClick={addPanel}
-              >
-                + Add Panel
-              </button>
-            )}
-            {panels.map((panel) => (
-              <PanelCard
-                key={panel.id}
-                panel={panel}
-                expanded={expandedPanel === panel.id}
-                onToggle={() => setExpandedPanel((id) => (id === panel.id ? null : panel.id))}
-                onChange={(f, v) => updatePanel(panel.id, f, v)}
-                onRedraw={() => redrawPanel(panel.id)}
-                onDelete={() => deletePanel(panel.id)}
-              />
-            ))}
-          </div>
-
-          {/* Trees */}
-          <div style={S.section}>
-            <div style={S.sectionTitle}>Trees</div>
-            {mode === "placeTree" ? (
-              <div>
-                <div style={S.infoBox}>Click map to place a tree…</div>
-                <button style={{ ...S.btn, ...S.btnDanger, width: "100%" }} onClick={cancelMode}>
-                  Cancel
-                </button>
-              </div>
-            ) : (
-              <button
-                style={{ ...S.btn, ...S.btnSecondary, width: "100%", marginBottom: 8 }}
-                onClick={startPlaceTree}
-              >
-                + Place Tree
-              </button>
-            )}
-
-            {pendingTree && (
-              <PendingTreeForm
-                tree={pendingTree}
-                onChange={(f, v) => setPendingTree((t) => ({ ...t, [f]: v }))}
-                onConfirm={confirmPendingTree}
-                onCancel={() => setPendingTree(null)}
-              />
-            )}
-
-            {trees.map((tree) => (
-              <TreeCard
-                key={tree.id}
-                tree={tree}
-                expanded={expandedTree === tree.id}
-                onToggle={() => setExpandedTree((id) => (id === tree.id ? null : tree.id))}
-                onChange={(f, v) => updateTree(tree.id, f, v)}
-                onDelete={() => deleteTree(tree.id)}
-              />
-            ))}
-          </div>
-
-          {/* Config */}
-          <div style={S.section}>
-            <div style={S.sectionTitle}>Config</div>
-            <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
-              <button style={{ ...S.btn, ...S.btnSecondary, flex: 1 }} onClick={exportConfig}>
-                Export
-              </button>
-              <label style={{ ...S.btn, ...S.btnSecondary, flex: 1, cursor: "pointer", justifyContent: "center" }}>
-                Import
-                <input type="file" accept=".json" style={{ display: "none" }} onChange={importConfig} />
-              </label>
+            {/* Search */}
+            <div style={S.section}>
+              <div style={S.sectionTitle}>Search Location</div>
+              <div ref={searchContainerRef} style={{ width: "100%" }} />
             </div>
-            {importError && <div style={S.errorBox}>{importError}</div>}
+
+            {/* Panel Array */}
+            <div style={S.section}>
+              <div style={S.sectionTitle}>Panel Array</div>
+              {mode === "drawPanel" ? (
+                <div style={{ marginBottom: 8 }}>
+                  <div style={S.infoBox}>{modeLabel}</div>
+                  <button style={{ ...S.btn, ...S.btnDanger, width: "100%" }} onClick={cancelMode}>Cancel</button>
+                </div>
+              ) : (
+                <button style={{ ...S.btn, ...S.btnSecondary, width: "100%", marginBottom: 8 }} onClick={addPanel}>
+                  + Add Panel
+                </button>
+              )}
+              {panels.map((panel) => (
+                <PanelCard
+                  key={panel.id}
+                  panel={panel}
+                  expanded={expandedPanel === panel.id}
+                  onToggle={() => setExpandedPanel((id) => id === panel.id ? null : panel.id)}
+                  onChange={(f, v) => updatePanel(panel.id, f, v)}
+                  onRedraw={() => redrawPanel(panel.id)}
+                  onDelete={() => deletePanel(panel.id)}
+                />
+              ))}
+            </div>
+
+            {/* Trees */}
+            <div style={S.section}>
+              <div style={S.sectionTitle}>Trees</div>
+              {mode === "placeTree" ? (
+                <div>
+                  <div style={S.infoBox}>Click map to place a tree…</div>
+                  <button style={{ ...S.btn, ...S.btnDanger, width: "100%" }} onClick={cancelMode}>Cancel</button>
+                </div>
+              ) : (
+                <button style={{ ...S.btn, ...S.btnSecondary, width: "100%", marginBottom: 8 }} onClick={() => setMode("placeTree")}>
+                  + Place Tree
+                </button>
+              )}
+              {pendingTree && (
+                <PendingTreeForm
+                  tree={pendingTree}
+                  onChange={(f, v) => setPendingTree((t) => ({ ...t, [f]: v }))}
+                  onConfirm={confirmPendingTree}
+                  onCancel={() => setPendingTree(null)}
+                />
+              )}
+              {trees.map((tree) => (
+                <TreeCard
+                  key={tree.id}
+                  tree={tree}
+                  expanded={expandedTree === tree.id}
+                  onToggle={() => setExpandedTree((id) => id === tree.id ? null : tree.id)}
+                  onChange={(f, v) => updateTree(tree.id, f, v)}
+                  onDelete={() => deleteTree(tree.id)}
+                />
+              ))}
+            </div>
+
+            {/* Config */}
+            <div style={S.section}>
+              <div style={S.sectionTitle}>Config</div>
+              <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
+                <button style={{ ...S.btn, ...S.btnSecondary, flex: 1 }} onClick={exportConfig}>Export</button>
+                <label style={{ ...S.btn, ...S.btnSecondary, flex: 1, cursor: "pointer", justifyContent: "center" }}>
+                  Import
+                  <input type="file" accept=".json" style={{ display: "none" }} onChange={importConfig} />
+                </label>
+              </div>
+              {importError && <div style={S.errorBox}>{importError}</div>}
+            </div>
+          </div>
+
+          <div style={S.sidebarFooter}>
+            {validationError && <div style={S.errorBox}>{validationError}</div>}
+            {serverError && <div style={S.errorBox}>{serverError}</div>}
+            <button
+              style={{ ...S.btn, ...S.btnPrimary, opacity: isAnalyzing ? 0.8 : 1, cursor: isAnalyzing ? "wait" : "pointer" }}
+              onClick={runAnalysis}
+              disabled={isAnalyzing}
+            >
+              {isAnalyzing ? <><Spinner /> Analyzing…</> : "Run Analysis"}
+            </button>
+            {heatmapStatus === "running" && (
+              <div style={{ ...S.infoBox, marginTop: 8, marginBottom: 0 }}>
+                Computing planting-impact heatmap…
+              </div>
+            )}
           </div>
         </div>
 
-        <div style={S.sidebarFooter}>
-          {validationError && <div style={S.errorBox}>{validationError}</div>}
-          {serverError && <div style={S.errorBox}>{serverError}</div>}
-          <button style={{ ...S.btn, ...S.btnPrimary }} onClick={runAnalysis}>
-            Run Analysis
-          </button>
-          {heatmapStatus === "running" && (
-            <div style={{ ...S.infoBox, marginTop: 8, marginBottom: 0 }}>
-              Computing planting-impact heatmap…
+        {/* Map */}
+        <div style={S.mapContainer}>
+          {!apiKey && (
+            <div style={{ ...S.infoBox, position: "absolute", top: 16, left: 16, zIndex: 50, maxWidth: 300 }}>
+              Set GOOGLE_MAPS_API_KEY environment variable to enable the map.
+            </div>
+          )}
+          <div ref={mapRef} style={{ width: "100%", height: "100%" }} />
+
+          {results && (
+            <div style={S.resultsPanel}>
+              <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 10 }}>Analysis Results</div>
+              <div style={S.statGrid}>
+                <div style={S.statCard}>
+                  <div style={S.statLabel}>Irradiance-Weighted</div>
+                  <div style={S.statValue}>{results.annual_shade_pct_irradiance?.toFixed(1)}</div>
+                  <div style={S.statUnit}>% annual shading</div>
+                </div>
+                <div style={S.statCard}>
+                  <div style={S.statLabel}>Raw Hours Shaded</div>
+                  <div style={S.statValue}>{results.annual_shade_pct_raw?.toFixed(1)}</div>
+                  <div style={S.statUnit}>% of daylight hours</div>
+                </div>
+              </div>
+              <div style={S.panelMeta}>
+                {panels.length > 1
+                  ? <span><b>{panels.length} panels</b> &nbsp;</span>
+                  : <span><b>Azimuth:</b> {results.panel_azimuth_deg?.toFixed(1)}° &nbsp;</span>
+                }
+                <span><b>Area:</b> {results.panel_area_m2 != null ? (results.panel_area_m2 * M_TO_FT * M_TO_FT).toFixed(0) : "—"} ft² &nbsp;</span>
+                <span><b>Year:</b> {year}</span>
+              </div>
+              <div style={S.tabs}>
+                {["monthly", "hourly", "per_tree"].map((t) => (
+                  <button
+                    key={t}
+                    style={{ ...S.tab, ...(activeTab === t ? S.tabActive : {}) }}
+                    onClick={() => setActiveTab(t)}
+                  >
+                    {t === "per_tree" ? "Per Tree" : t.charAt(0).toUpperCase() + t.slice(1)}
+                  </button>
+                ))}
+              </div>
+              {charts && activeTab === "monthly" && renderChart(charts.monthly)}
+              {charts && activeTab === "hourly" && renderChart(charts.hourly)}
+              {charts && activeTab === "per_tree" && renderChart(charts.per_tree)}
             </div>
           )}
         </div>
       </div>
-
-      {/* Map */}
-      <div style={S.mapContainer}>
-        {!apiKey && (
-          <div style={{ ...S.infoBox, position: "absolute", top: 16, left: 16, zIndex: 50, maxWidth: 300 }}>
-            Set GOOGLE_MAPS_API_KEY environment variable to enable the map.
-          </div>
-        )}
-        <div ref={mapRef} style={{ width: "100%", height: "100%" }} />
-
-        {/* Results floating panel */}
-        {results && (
-          <div style={S.resultsPanel}>
-            <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 10 }}>Analysis Results</div>
-
-            <div style={S.statGrid}>
-              <div style={S.statCard}>
-                <div style={S.statLabel}>Irradiance-Weighted</div>
-                <div style={S.statValue}>{results.annual_shade_pct_irradiance?.toFixed(1)}</div>
-                <div style={S.statUnit}>% annual shading</div>
-              </div>
-              <div style={S.statCard}>
-                <div style={S.statLabel}>Raw Hours Shaded</div>
-                <div style={S.statValue}>{results.annual_shade_pct_raw?.toFixed(1)}</div>
-                <div style={S.statUnit}>% of daylight hours</div>
-              </div>
-            </div>
-
-            <div style={S.panelMeta}>
-              {panels.length > 1
-                ? <span><b>{panels.length} panels</b> &nbsp;</span>
-                : <span><b>Azimuth:</b> {results.panel_azimuth_deg?.toFixed(1)}° &nbsp;</span>
-              }
-              <span><b>Area:</b> {results.panel_area_m2?.toFixed(1)} m² &nbsp;</span>
-              <span><b>Year:</b> {year}</span>
-            </div>
-
-            <div style={S.tabs}>
-              {["monthly", "hourly", "per_tree"].map((t) => (
-                <button
-                  key={t}
-                  style={{ ...S.tab, ...(activeTab === t ? S.tabActive : {}) }}
-                  onClick={() => setActiveTab(t)}
-                >
-                  {t === "per_tree" ? "Per Tree" : t.charAt(0).toUpperCase() + t.slice(1)}
-                </button>
-              ))}
-            </div>
-
-            {charts && activeTab === "monthly" && renderChart(charts.monthly)}
-            {charts && activeTab === "hourly" && renderChart(charts.hourly)}
-            {charts && activeTab === "per_tree" && renderChart(charts.per_tree)}
-          </div>
-        )}
-      </div>
-    </div>
+    </>
   );
 }
 
@@ -1034,63 +964,42 @@ function PanelCard({ panel, expanded, onToggle, onChange, onRedraw, onDelete }) 
     <div style={S.treeCard}>
       <div style={S.treeCardHeader} onClick={onToggle}>
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <span style={{ fontSize: 14 }}>◼</span>
+          <Chevron expanded={expanded} />
+          <span style={{ fontSize: 13 }}>◼</span>
           <span style={{ fontWeight: 500 }}>{panel.name}</span>
-          {!panel.corners && (
-            <span style={{ color: "#94a3b8", fontSize: 11 }}>not drawn</span>
-          )}
+          {!panel.corners && <span style={{ color: "#94a3b8", fontSize: 11 }}>not drawn</span>}
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-          {meta && <span style={S.metaTag}>{meta.area.toFixed(1)} m²</span>}
-          <button
-            style={{ ...S.btn, ...S.btnDanger, padding: "3px 7px", fontSize: 11 }}
-            onClick={(e) => { e.stopPropagation(); onDelete(); }}
-          >✕</button>
+          {meta && <span style={S.metaTag}>{meta.areaFt2.toFixed(0)} ft²</span>}
+          <button style={{ ...S.btn, ...S.btnDanger, padding: "3px 7px", fontSize: 11 }}
+            onClick={(e) => { e.stopPropagation(); onDelete(); }}>✕</button>
         </div>
       </div>
       {expanded && (
         <div style={S.treeCardBody}>
           <label style={S.label}>Name</label>
-          <input
-            style={{ ...S.input, marginBottom: 6 }}
-            value={panel.name}
-            onChange={(e) => onChange("name", e.target.value)}
-          />
+          <input style={{ ...S.input, marginBottom: 6 }} value={panel.name}
+            onChange={(e) => onChange("name", e.target.value)} />
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 6 }}>
             <div>
               <label style={S.label}>Tilt (°)</label>
-              <input
-                style={S.input}
-                type="number"
-                min="1"
-                max="90"
-                value={panel.tilt_deg}
-                onChange={(e) => onChange("tilt_deg", e.target.value)}
-              />
+              <input style={S.input} type="number" min="1" max="90" value={panel.tilt_deg}
+                onChange={(e) => onChange("tilt_deg", e.target.value)} />
             </div>
             <div>
-              <label style={S.label}>Height above ground (m)</label>
-              <input
-                style={S.input}
-                type="number"
-                min="0"
-                step="0.1"
-                value={panel.height_m}
-                onChange={(e) => onChange("height_m", e.target.value)}
-              />
+              <label style={S.label}>Height above ground (ft)</label>
+              <input style={S.input} type="number" min="0" step="1" value={panel.height_ft}
+                onChange={(e) => onChange("height_ft", e.target.value)} />
             </div>
           </div>
           {meta && (
             <div style={{ ...S.panelMeta, marginBottom: 8, fontSize: 11 }}>
               <b>Azimuth:</b> {meta.azimuth.toFixed(1)}° &nbsp;
-              <b>Area:</b> {meta.area.toFixed(1)} m² &nbsp;
-              <b>Dims:</b> ~{meta.widthM.toFixed(1)} × {meta.heightM.toFixed(1)} m
+              <b>Area:</b> {meta.areaFt2.toFixed(0)} ft² &nbsp;
+              <b>Dims:</b> ~{meta.widthFt.toFixed(0)} × {meta.heightFt.toFixed(0)} ft
             </div>
           )}
-          <button
-            style={{ ...S.btn, ...S.btnSecondary, width: "100%" }}
-            onClick={onRedraw}
-          >
+          <button style={{ ...S.btn, ...S.btnSecondary, width: "100%" }} onClick={onRedraw}>
             {panel.corners ? "Redraw Footprint" : "Draw Footprint"}
           </button>
         </div>
@@ -1121,14 +1030,14 @@ function PendingTreeForm({ tree, onChange, onConfirm, onCancel }) {
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 6 }}>
           <div>
-            <label style={S.label}>Height (m)</label>
-            <input style={S.input} type="number" min="1" value={tree.height_m}
-              onChange={(e) => onChange("height_m", parseFloat(e.target.value) || 1)} />
+            <label style={S.label}>Height (ft)</label>
+            <input style={S.input} type="number" min="1" value={tree.height_ft}
+              onChange={(e) => onChange("height_ft", e.target.value)} />
           </div>
           <div>
-            <label style={S.label}>Canopy radius (m)</label>
-            <input style={S.input} type="number" min="0.5" value={tree.canopy_radius_m}
-              onChange={(e) => onChange("canopy_radius_m", parseFloat(e.target.value) || 0.5)} />
+            <label style={S.label}>Canopy radius (ft)</label>
+            <input style={S.input} type="number" min="1" value={tree.canopy_radius_ft}
+              onChange={(e) => onChange("canopy_radius_ft", e.target.value)} />
           </div>
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 10 }}>
@@ -1162,15 +1071,14 @@ function TreeCard({ tree, expanded, onToggle, onChange, onDelete }) {
     <div style={S.treeCard}>
       <div style={S.treeCardHeader} onClick={onToggle}>
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <Chevron expanded={expanded} />
           <span style={{ fontSize: 16 }}>{tree.deciduous ? "🌿" : "🌲"}</span>
           <span style={{ fontWeight: 500 }}>{tree.name}</span>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-          <span style={S.metaTag}>{tree.height_m}m</span>
-          <button
-            style={{ ...S.btn, ...S.btnDanger, padding: "3px 7px", fontSize: 11 }}
-            onClick={(e) => { e.stopPropagation(); onDelete(); }}
-          >✕</button>
+          <span style={S.metaTag}>{tree.height_ft} ft</span>
+          <button style={{ ...S.btn, ...S.btnDanger, padding: "3px 7px", fontSize: 11 }}
+            onClick={(e) => { e.stopPropagation(); onDelete(); }}>✕</button>
         </div>
       </div>
       {expanded && (
@@ -1192,14 +1100,14 @@ function TreeCard({ tree, expanded, onToggle, onChange, onDelete }) {
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 6 }}>
             <div>
-              <label style={S.label}>Height (m)</label>
-              <input style={S.input} type="number" min="1" value={tree.height_m}
-                onChange={(e) => onChange("height_m", parseFloat(e.target.value) || 1)} />
+              <label style={S.label}>Height (ft)</label>
+              <input style={S.input} type="number" min="1" value={tree.height_ft}
+                onChange={(e) => onChange("height_ft", e.target.value)} />
             </div>
             <div>
-              <label style={S.label}>Canopy radius (m)</label>
-              <input style={S.input} type="number" min="0.5" value={tree.canopy_radius_m}
-                onChange={(e) => onChange("canopy_radius_m", parseFloat(e.target.value) || 0.5)} />
+              <label style={S.label}>Canopy radius (ft)</label>
+              <input style={S.input} type="number" min="1" value={tree.canopy_radius_ft}
+                onChange={(e) => onChange("canopy_radius_ft", e.target.value)} />
             </div>
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
@@ -1236,13 +1144,11 @@ function PlotlyEmbed({ figJson }) {
 <html><head>
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"><\/script>
 <style>body{margin:0;padding:0;background:white;}#chart{width:100%;height:260px;}</style>
-</head><body>
-<div id="chart"></div>
+</head><body><div id="chart"></div>
 <script>
   var fig = ${figJson};
   Plotly.newPlot('chart', fig.data, Object.assign({}, fig.layout, {
-    autosize: true,
-    margin: {l:50, r:20, t:40, b:50},
+    autosize: true, margin: {l:50, r:20, t:40, b:50},
   }), {responsive: true, displayModeBar: false});
 <\/script>
 </body></html>`);

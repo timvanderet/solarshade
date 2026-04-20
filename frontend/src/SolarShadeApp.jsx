@@ -365,15 +365,24 @@ function SolarShadeApp() {
     };
     Streamlit.events.addEventListener(Streamlit.RENDER_EVENT, onRender);
 
+    // Signal ready first so Streamlit registers us before we send height.
+    // Retry a few times in case Streamlit's listener wasn't registered yet
+    // when the first message arrived (race on cached-bundle fast load).
+    Streamlit.setComponentReady();
+    const t1 = setTimeout(() => Streamlit.setComponentReady(), 150);
+    const t2 = setTimeout(() => Streamlit.setComponentReady(), 600);
+    const t3 = setTimeout(() => Streamlit.setComponentReady(), 2000);
+
     const setHeight = () => Streamlit.setFrameHeight(window.innerHeight);
     setHeight();
     window.addEventListener("resize", setHeight);
-    // Signal ready — Streamlit will respond with a RENDER event containing args
-    Streamlit.setComponentReady();
 
     return () => {
       Streamlit.events.removeEventListener(Streamlit.RENDER_EVENT, onRender);
       window.removeEventListener("resize", setHeight);
+      clearTimeout(t1);
+      clearTimeout(t2);
+      clearTimeout(t3);
     };
   }, []);
 
@@ -402,24 +411,29 @@ function SolarShadeApp() {
     });
     mapInstanceRef.current = map;
 
-    // Place autocomplete — use PlaceAutocompleteElement (non-deprecated)
-    // Listen for gmp-placeselect, fetch location + viewport fields,
-    // then pan/zoom using the modern place.location / place.viewport API.
+    // Address search — Autocomplete on a plain <input>.
+    // PlaceAutocompleteElement (web component) has dropdown-clipping issues
+    // inside overflow:auto containers; Autocomplete + input is more reliable.
     if (searchContainerRef.current) {
-      window.google.maps.importLibrary("places").then(({ PlaceAutocompleteElement }) => {
-        const ac = new PlaceAutocompleteElement();
-        ac.style.width = "100%";
-        searchContainerRef.current.appendChild(ac);
-        ac.addEventListener("gmp-placeselect", async (e) => {
-          const place = e.place;
-          await place.fetchFields({ fields: ["location", "viewport"] });
-          if (place.viewport) {
-            map.fitBounds(place.viewport);
-          } else if (place.location) {
-            map.panTo(place.location);
-            map.setZoom(19);
-          }
-        });
+      const input = document.createElement("input");
+      input.placeholder = "Search address…";
+      input.style.cssText = [
+        "width:100%", "padding:7px 10px", "border:1px solid #e2e8f0",
+        "border-radius:5px", "font-size:13px", "font-family:inherit",
+        "color:#1e293b", "background:#fff", "outline:none", "box-sizing:border-box",
+      ].join(";");
+      searchContainerRef.current.appendChild(input);
+      const ac = new window.google.maps.places.Autocomplete(input, {
+        fields: ["geometry", "name"],
+      });
+      ac.addListener("place_changed", () => {
+        const place = ac.getPlace();
+        if (place.geometry?.viewport) {
+          map.fitBounds(place.geometry.viewport);
+        } else if (place.geometry?.location) {
+          map.panTo(place.geometry.location);
+          map.setZoom(19);
+        }
       });
     }
   }, [mapLoaded]);

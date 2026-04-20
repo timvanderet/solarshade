@@ -27,6 +27,7 @@ st.markdown("""
   [data-testid="stMainBlockContainer"],
   [data-testid="stVerticalBlock"],
   [data-testid="stVerticalBlockBorderWrapper"],
+  [data-testid="stVerticalBlockBorderWrapper"] > div,
   .block-container,
   section.main > div {
     padding: 0 !important;
@@ -36,12 +37,19 @@ st.markdown("""
     overflow: hidden !important;
   }
 
-  /* Make the custom component iframe fill the full viewport */
-  iframe[title="solarshade"] {
+  /* Make the custom component iframe fill the full viewport.
+     Streamlit sets the component name to "{module}.{name}" so the iframe
+     title is "app.solarshade", not "solarshade". Target all three ways. */
+  iframe[title="app.solarshade"],
+  iframe[title="solarshade"],
+  iframe[data-testid="stCustomComponentV1"],
+  iframe.stCustomComponentV1 {
     width: 100vw !important;
     height: 100vh !important;
     border: none !important;
     display: block !important;
+    visibility: visible !important;
+    opacity: 1 !important;
   }
 </style>
 """, unsafe_allow_html=True)

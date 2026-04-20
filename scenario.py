@@ -25,6 +25,7 @@ def run_scenario(
     panel_corners: list[tuple[float, float]],
     panel_tilt_deg: float,
     trees: list[dict],
+    panel_height_m: float = 0.0,
     timezone: str | None = None,
     year: int = 2025,
 ) -> dict:
@@ -81,7 +82,7 @@ def run_scenario(
         # Combined shadow (union of all trees)
         shadow_polys = []
         for tree in trees:
-            sp = compute_shadow_polygon(tree, az, el, origin_lat, origin_lon, date)
+            sp = compute_shadow_polygon(tree, az, el, origin_lat, origin_lon, date, panel_height_m=panel_height_m)
             if sp is not None:
                 shadow_polys.append(sp)
 
@@ -106,7 +107,7 @@ def run_scenario(
 
         # Per-tree isolation
         for tree in trees:
-            sp = compute_shadow_polygon(tree, az, el, origin_lat, origin_lon, date)
+            sp = compute_shadow_polygon(tree, az, el, origin_lat, origin_lon, date, panel_height_m=panel_height_m)
             tf_val = shade_fraction(panel_poly, sp)
             per_tree_raw[tree["id"]] += tf_val
             per_tree_irr[tree["id"]] += tf_val * w
@@ -172,6 +173,98 @@ def run_scenario(
     }
 
 
+def run_multi_panel_scenario(
+    panels: list[dict],
+    trees: list[dict],
+    year: int = 2025,
+) -> dict:
+    """Run scenario for each panel independently and combine results area-weighted."""
+    if not panels:
+        raise ValueError("At least one panel is required")
+
+    panel_results = []
+    total_area = 0.0
+    for panel in panels:
+        r = run_scenario(
+            panel_corners=panel["corners"],
+            panel_tilt_deg=panel["tilt_deg"],
+            trees=trees,
+            panel_height_m=panel.get("height_m", 0.0),
+            year=year,
+        )
+        area = r["panel_area_m2"]
+        total_area += area
+        panel_results.append((r, area))
+
+    if total_area == 0:
+        return panel_results[0][0]
+
+    def wavg(key):
+        return sum(r[key] * a for r, a in panel_results) / total_area
+
+    # Annual
+    combined = {
+        "annual_shade_pct_raw": round(wavg("annual_shade_pct_raw"), 3),
+        "annual_shade_pct_irradiance": round(wavg("annual_shade_pct_irradiance"), 3),
+        "panel_area_m2": round(total_area, 2),
+        "panel_azimuth_deg": panel_results[0][0]["panel_azimuth_deg"],
+        "panel_centroid": panel_results[0][0]["panel_centroid"],
+        "total_daylight_hours": panel_results[0][0]["total_daylight_hours"],
+    }
+
+    # Monthly: area-weighted average
+    combined["monthly"] = []
+    for i in range(12):
+        combined["monthly"].append({
+            "month": i + 1,
+            "month_name": panel_results[0][0]["monthly"][i]["month_name"],
+            "shade_pct_raw": round(
+                sum(r["monthly"][i]["shade_pct_raw"] * a for r, a in panel_results) / total_area, 3
+            ),
+            "shade_pct_irradiance": round(
+                sum(r["monthly"][i]["shade_pct_irradiance"] * a for r, a in panel_results) / total_area, 3
+            ),
+        })
+
+    # Per-tree: area-weighted average
+    combined["per_tree"] = []
+    for tree in trees:
+        tid = tree["id"]
+        raw = sum(
+            next(pt["shade_pct_raw"] for pt in r["per_tree"] if pt["id"] == tid) * a
+            for r, a in panel_results
+        ) / total_area
+        irr = sum(
+            next(pt["shade_pct_irradiance"] for pt in r["per_tree"] if pt["id"] == tid) * a
+            for r, a in panel_results
+        ) / total_area
+        combined["per_tree"].append({
+            "id": tid,
+            "name": tree["name"],
+            "shade_pct_raw": round(raw, 3),
+            "shade_pct_irradiance": round(irr, 3),
+        })
+
+    # Hourly heatmap: area-weighted, keeping None for nighttime
+    days_in_year = len(panel_results[0][0]["hourly_heatmap"]["x_labels"])
+    heatmap_z = [[None] * days_in_year for _ in range(24)]
+    for h in range(24):
+        for d in range(days_in_year):
+            cells = [(r["hourly_heatmap"]["z"][h][d], a) for r, a in panel_results]
+            day_vals = [(v, a) for v, a in cells if v is not None]
+            if day_vals:
+                day_total_area = sum(a for _, a in day_vals)
+                heatmap_z[h][d] = sum(v * a for v, a in day_vals) / day_total_area
+
+    combined["hourly_heatmap"] = {
+        "z": heatmap_z,
+        "x_labels": panel_results[0][0]["hourly_heatmap"]["x_labels"],
+        "y_labels": panel_results[0][0]["hourly_heatmap"]["y_labels"],
+    }
+
+    return combined
+
+
 def run_heatmap_grid(
     panel_corners: list[tuple[float, float]],
     panel_tilt_deg: float,
@@ -181,6 +274,7 @@ def run_heatmap_grid(
     year: int = 2025,
     grid_size: int = 40,
     grid_spacing_m: float = 2.0,
+    panel_height_m: float = 0.0,
 ) -> list[dict]:
     centroid_lat, centroid_lon = _panel_centroid(panel_corners)
     if timezone is None:
@@ -226,6 +320,7 @@ def run_heatmap_grid(
                     origin_lat,
                     origin_lon,
                     date,
+                    panel_height_m=panel_height_m,
                 )
                 frac = shade_fraction(panel_poly, sp)
                 irr_shaded += frac * srow["irradiance_weight"]

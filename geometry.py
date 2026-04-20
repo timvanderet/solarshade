@@ -40,6 +40,7 @@ def compute_shadow_polygon(
     origin_lat: float,
     origin_lon: float,
     date: datetime.date,
+    panel_height_m: float = 0.0,
 ) -> Polygon | None:
     if solar_elevation_deg <= 0:
         return None
@@ -53,7 +54,10 @@ def compute_shadow_polygon(
     shape = tree.get("shape", "cylinder")
 
     elev_rad = math.radians(solar_elevation_deg)
-    shadow_length = height_m / math.tan(elev_rad)
+    eff_height = height_m - panel_height_m
+    if eff_height <= 0:
+        return None
+    shadow_length = eff_height / math.tan(elev_rad)
 
     # Shadow direction: sun azimuth points toward sun, shadow falls opposite
     az_rad = math.radians(solar_azimuth_deg)

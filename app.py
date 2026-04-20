@@ -117,18 +117,25 @@ if component_value and component_value.get("run_analysis"):
         st.session_state.heatmap_grid = None
         st.session_state.heatmap_status = "idle"
 
-        panel_corners = [tuple(c) for c in component_value.get("panel_corners", [])]
-        panel_tilt_deg = component_value.get("panel_tilt_deg")
+        panels_raw = component_value.get("panels", [])
+        panels = []
+        for p in panels_raw:
+            panels.append({
+                "id": p.get("id", ""),
+                "name": p.get("name", "Panel"),
+                "corners": [tuple(c) for c in p.get("corners", [])],
+                "tilt_deg": float(p.get("tilt_deg", 22)),
+                "height_m": float(p.get("height_m", 1.0)),
+            })
         trees = component_value.get("trees", [])
         year = component_value.get("year", 2025)
 
         try:
-            from scenario import run_scenario, run_heatmap_grid
+            from scenario import run_multi_panel_scenario, run_heatmap_grid
             from analysis import generate_charts
 
-            results = run_scenario(
-                panel_corners=panel_corners,
-                panel_tilt_deg=panel_tilt_deg,
+            results = run_multi_panel_scenario(
+                panels=panels,
                 trees=trees,
                 year=year,
             )
@@ -144,10 +151,13 @@ if component_value and component_value.get("run_analysis"):
             else:
                 avg_h, avg_r = 10.0, 3.0
 
+            # Use first panel for heatmap grid
+            first_panel = panels[0]
+
             result_container = {"done": False, "data": None, "error": None}
             st.session_state._heatmap_thread_result = result_container
 
-            def _run_heatmap(corners, tilt, h, r, yr, container):
+            def _run_heatmap(corners, tilt, h, r, yr, ph, container):
                 try:
                     data = run_heatmap_grid(
                         panel_corners=corners,
@@ -155,6 +165,7 @@ if component_value and component_value.get("run_analysis"):
                         tree_height_m=h,
                         canopy_radius_m=r,
                         year=yr,
+                        panel_height_m=ph,
                     )
                     container["data"] = data
                 except Exception as exc:
@@ -164,7 +175,8 @@ if component_value and component_value.get("run_analysis"):
 
             t = threading.Thread(
                 target=_run_heatmap,
-                args=(panel_corners, panel_tilt_deg, avg_h, avg_r, year, result_container),
+                args=(first_panel["corners"], first_panel["tilt_deg"],
+                      avg_h, avg_r, year, first_panel["height_m"], result_container),
                 daemon=True,
             )
             t.start()

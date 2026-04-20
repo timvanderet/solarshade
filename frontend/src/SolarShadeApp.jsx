@@ -242,10 +242,8 @@ function genId() {
   return "id-" + Math.random().toString(36).slice(2, 10);
 }
 
-// Degrees to radians
 function toRad(d) { return d * Math.PI / 180; }
 
-// Convert GPS corners to local-meter XY (equirectangular, origin = corners[0])
 function gpsToLocal(lat, lon, originLat, originLon) {
   const R = 6371000;
   const x = toRad(lon - originLon) * R * Math.cos(toRad(originLat));
@@ -253,15 +251,11 @@ function gpsToLocal(lat, lon, originLat, originLon) {
   return [x, y];
 }
 
-// Compute panel metadata (azimuth, area, dims) from 4 GPS corners.
-// Mirrors the Python panels.py logic for immediate frontend display.
-// Azimuth convention: perpendicular to the long axis, in southern semicircle (90,270].
 function computePanelMeta(corners) {
   if (!corners || corners.length !== 4) return null;
   const origin = corners[0];
   const local = corners.map(([lat, lon]) => gpsToLocal(lat, lon, origin[0], origin[1]));
 
-  // Shoelace area (in m²)
   let area = 0;
   for (let i = 0; i < 4; i++) {
     const [x0, y0] = local[i];
@@ -270,22 +264,18 @@ function computePanelMeta(corners) {
   }
   area = Math.abs(area) / 2;
 
-  // Edge lengths and bearings
   const edges = local.map((pt, i) => {
     const nxt = local[(i + 1) % 4];
     const dx = nxt[0] - pt[0], dy = nxt[1] - pt[1];
     const len = Math.sqrt(dx * dx + dy * dy);
-    // bearing in degrees from north (0=N, 90=E, 180=S, 270=W)
     const bearing = (Math.atan2(dx, dy) * 180 / Math.PI + 360) % 360;
     return { len, bearing };
   });
 
-  // Identify long-axis pair (0+2 vs 1+3)
   const pair02 = edges[0].len + edges[2].len;
   const pair13 = edges[1].len + edges[3].len;
   const longBearing = pair02 >= pair13 ? edges[0].bearing : edges[1].bearing;
 
-  // Panel azimuth is perpendicular to long axis, in southern semicircle (90,270]
   const cand1 = (longBearing + 90) % 360;
   const cand2 = (longBearing - 90 + 360) % 360;
   const inSouthern = (b) => b > 90 && b <= 270;
@@ -294,7 +284,6 @@ function computePanelMeta(corners) {
   else if (inSouthern(cand2) && !inSouthern(cand1)) azimuth = cand2;
   else azimuth = Math.abs(cand1 - 270) <= Math.abs(cand2 - 270) ? cand1 : cand2;
 
-  // Approximate width x length
   const widthM = (edges[0].len + edges[2].len) / 2;
   const heightM = (edges[1].len + edges[3].len) / 2;
 
@@ -307,7 +296,6 @@ function computePanelMeta(corners) {
 }
 
 function ensureClockwise(corners) {
-  // Shoelace formula sign
   let area = 0;
   const n = corners.length;
   for (let i = 0; i < n; i++) {
@@ -315,14 +303,12 @@ function ensureClockwise(corners) {
     const [x1, y1] = corners[(i + 1) % n];
     area += x0 * y1 - x1 * y0;
   }
-  // area > 0 → CCW in lat/lon space → reverse
   if (area > 0) return [...corners].reverse();
   return corners;
 }
 
 // ── Main Component ───────────────────────────────────────────────────────────
 function SolarShadeApp() {
-  // Receive args from Streamlit via render events; render immediately with defaults.
   const [streamlitArgs, setStreamlitArgs] = useState({});
   const {
     google_maps_api_key: apiKey = "",
@@ -336,19 +322,24 @@ function SolarShadeApp() {
 
   const mapRef = useRef(null);
   const mapInstanceRef = useRef(null);
-  const polygonRef = useRef(null);
+  const panelPolygonsRef = useRef({});   // panelId → Polygon
   const pendingCornersRef = useRef([]);
   const pendingMarkersRef = useRef([]);
   const treeMarkersRef = useRef({});
-  const pendingMarkerRef = useRef(null); // Fix 3: live-update marker for pending tree
+  const pendingMarkerRef = useRef(null);
   const heatmapOverlayRef = useRef(null);
   const searchContainerRef = useRef(null);
   const canvasOverlayRef = useRef(null);
 
   const [mapLoaded, setMapLoaded] = useState(false);
   const [mode, setMode] = useState("idle"); // idle | drawPanel | placeTree
-  const [panelCorners, setPanelCorners] = useState(null);
-  const [panelTilt, setPanelTilt] = useState("22");
+  const [pendingCount, setPendingCount] = useState(0);
+
+  // Multi-panel state
+  const [panels, setPanels] = useState([]); // [{id, name, corners, tilt_deg, height_m}]
+  const [drawingPanelId, setDrawingPanelId] = useState(null);
+  const [expandedPanel, setExpandedPanel] = useState(null);
+
   const [trees, setTrees] = useState([]);
   const [expandedTree, setExpandedTree] = useState(null);
   const [pendingTree, setPendingTree] = useState(null);
@@ -357,32 +348,23 @@ function SolarShadeApp() {
   const [year, setYear] = useState(2025);
   const [importError, setImportError] = useState(null);
 
-  // Connect to Streamlit and set iframe height
+  // Connect to Streamlit
   useEffect(() => {
-    // Update state whenever Streamlit sends new props
     const onRender = (event) => {
       setStreamlitArgs(event.detail?.args || {});
     };
     Streamlit.events.addEventListener(Streamlit.RENDER_EVENT, onRender);
-
-    // Signal ready first so Streamlit registers us before we send height.
-    // Retry a few times in case Streamlit's listener wasn't registered yet
-    // when the first message arrived (race on cached-bundle fast load).
     Streamlit.setComponentReady();
     const t1 = setTimeout(() => Streamlit.setComponentReady(), 150);
     const t2 = setTimeout(() => Streamlit.setComponentReady(), 600);
     const t3 = setTimeout(() => Streamlit.setComponentReady(), 2000);
-
     const setHeight = () => Streamlit.setFrameHeight(window.innerHeight);
     setHeight();
     window.addEventListener("resize", setHeight);
-
     return () => {
       Streamlit.events.removeEventListener(Streamlit.RENDER_EVENT, onRender);
       window.removeEventListener("resize", setHeight);
-      clearTimeout(t1);
-      clearTimeout(t2);
-      clearTimeout(t3);
+      clearTimeout(t1); clearTimeout(t2); clearTimeout(t3);
     };
   }, []);
 
@@ -411,9 +393,6 @@ function SolarShadeApp() {
     });
     mapInstanceRef.current = map;
 
-    // Address search — Autocomplete on a plain <input>.
-    // PlaceAutocompleteElement (web component) has dropdown-clipping issues
-    // inside overflow:auto containers; Autocomplete + input is more reliable.
     if (searchContainerRef.current) {
       const input = document.createElement("input");
       input.placeholder = "Search address…";
@@ -438,6 +417,13 @@ function SolarShadeApp() {
     }
   }, [mapLoaded]);
 
+  // Cursor: crosshair when drawing or placing
+  useEffect(() => {
+    if (!mapInstanceRef.current) return;
+    const cursor = (mode === "drawPanel" || mode === "placeTree") ? "crosshair" : "";
+    mapInstanceRef.current.setOptions({ draggableCursor: cursor });
+  }, [mode, mapLoaded]);
+
   // Map click handler
   useEffect(() => {
     if (!mapInstanceRef.current) return;
@@ -446,11 +432,11 @@ function SolarShadeApp() {
       const { latLng } = e;
       const lat = latLng.lat(), lng = latLng.lng();
 
-      if (mode === "drawPanel") {
+      if (mode === "drawPanel" && drawingPanelId) {
         const corners = [...pendingCornersRef.current, [lat, lng]];
         pendingCornersRef.current = corners;
+        setPendingCount(corners.length);
 
-        // Add click marker
         const marker = new window.google.maps.Marker({
           position: { lat, lng },
           map,
@@ -466,15 +452,17 @@ function SolarShadeApp() {
         pendingMarkersRef.current.push(marker);
 
         if (corners.length === 4) {
-          // Clear click markers
           pendingMarkersRef.current.forEach((m) => m.setMap(null));
           pendingMarkersRef.current = [];
           pendingCornersRef.current = [];
+          setPendingCount(0);
 
           const ordered = ensureClockwise(corners);
-          setPanelCorners(ordered);
-          drawPolygon(ordered, map);
+          const pid = drawingPanelId;
+          setPanels((prev) => prev.map((p) => p.id === pid ? { ...p, corners: ordered } : p));
+          drawPanelPolygon(pid, ordered, map);
           setMode("idle");
+          setDrawingPanelId(null);
         }
       } else if (mode === "placeTree") {
         setPendingTree({
@@ -491,10 +479,12 @@ function SolarShadeApp() {
       }
     });
     return () => window.google.maps.event.removeListener(listener);
-  }, [mapLoaded, mode, trees.length]);
+  }, [mapLoaded, mode, drawingPanelId, trees.length]);
 
-  function drawPolygon(corners, map) {
-    if (polygonRef.current) polygonRef.current.setMap(null);
+  function drawPanelPolygon(panelId, corners, map) {
+    if (panelPolygonsRef.current[panelId]) {
+      panelPolygonsRef.current[panelId].setMap(null);
+    }
     const path = corners.map(([lat, lng]) => ({ lat, lng }));
     const poly = new window.google.maps.Polygon({
       paths: path,
@@ -507,18 +497,18 @@ function SolarShadeApp() {
       draggable: false,
       map,
     });
-    polygonRef.current = poly;
+    panelPolygonsRef.current[panelId] = poly;
 
-    // Update corners on edit
     const updateCorners = () => {
       const pts = poly.getPath().getArray().map((p) => [p.lat(), p.lng()]);
-      setPanelCorners(ensureClockwise(pts));
+      const pid = panelId;
+      setPanels((prev) => prev.map((p) => p.id === pid ? { ...p, corners: ensureClockwise(pts) } : p));
     };
     window.google.maps.event.addListener(poly.getPath(), "set_at", updateCorners);
     window.google.maps.event.addListener(poly.getPath(), "insert_at", updateCorners);
   }
 
-  // Fix 3: Sync pending tree marker live as lat/lon are edited
+  // Sync pending tree marker
   useEffect(() => {
     const map = mapInstanceRef.current;
     if (!map || !window.google) return;
@@ -553,12 +543,9 @@ function SolarShadeApp() {
     if (!mapInstanceRef.current) return;
     const map = mapInstanceRef.current;
     const currentIds = new Set(trees.map((t) => t.id));
-
-    // Remove deleted
     Object.entries(treeMarkersRef.current).forEach(([id, m]) => {
       if (!currentIds.has(id)) { m.setMap(null); delete treeMarkersRef.current[id]; }
     });
-    // Add/update
     trees.forEach((tree) => {
       if (treeMarkersRef.current[tree.id]) {
         treeMarkersRef.current[tree.id].setPosition({ lat: tree.lat, lng: tree.lon });
@@ -581,12 +568,10 @@ function SolarShadeApp() {
     });
   }, [trees, mapLoaded]);
 
-  // Render planting-impact heatmap via custom OverlayView canvas
+  // Planting-impact heatmap overlay
   useEffect(() => {
     const map = mapInstanceRef.current;
     if (!map || !window.google) return;
-
-    // Remove previous overlay
     if (canvasOverlayRef.current) {
       canvasOverlayRef.current.setMap(null);
       canvasOverlayRef.current = null;
@@ -596,9 +581,7 @@ function SolarShadeApp() {
     const maxShade = Math.max(...heatmapGrid.map((p) => p.shade_pct), 0.001);
     if (maxShade === 0) return;
 
-    // Heat colour ramp: yellow → orange → red
     function heatColor(t) {
-      // t in [0,1]
       const stops = [
         [254, 240, 217, 0],
         [253, 187, 132, 100],
@@ -664,29 +647,72 @@ function SolarShadeApp() {
 
   // ── Handlers ──────────────────────────────────────────────────────────────
 
-  function startDrawPanel() {
-    if (polygonRef.current) polygonRef.current.setMap(null);
-    setPanelCorners(null);
+  function addPanel() {
+    const newPanel = {
+      id: genId(),
+      name: `Panel ${panels.length + 1}`,
+      corners: null,
+      tilt_deg: "22",
+      height_m: "1.0",
+    };
     pendingCornersRef.current = [];
     pendingMarkersRef.current.forEach((m) => m.setMap(null));
     pendingMarkersRef.current = [];
+    setPendingCount(0);
+    setPanels((prev) => [...prev, newPanel]);
+    setDrawingPanelId(newPanel.id);
     setMode("drawPanel");
+  }
+
+  function redrawPanel(panelId) {
+    if (panelPolygonsRef.current[panelId]) {
+      panelPolygonsRef.current[panelId].setMap(null);
+      delete panelPolygonsRef.current[panelId];
+    }
+    setPanels((prev) => prev.map((p) => p.id === panelId ? { ...p, corners: null } : p));
+    pendingCornersRef.current = [];
+    pendingMarkersRef.current.forEach((m) => m.setMap(null));
+    pendingMarkersRef.current = [];
+    setPendingCount(0);
+    setDrawingPanelId(panelId);
+    setMode("drawPanel");
+  }
+
+  function deletePanel(id) {
+    if (panelPolygonsRef.current[id]) {
+      panelPolygonsRef.current[id].setMap(null);
+      delete panelPolygonsRef.current[id];
+    }
+    setPanels((prev) => prev.filter((p) => p.id !== id));
+    if (drawingPanelId === id) {
+      setDrawingPanelId(null);
+      setMode("idle");
+      pendingCornersRef.current = [];
+      pendingMarkersRef.current.forEach((m) => m.setMap(null));
+      pendingMarkersRef.current = [];
+      setPendingCount(0);
+    }
+  }
+
+  function updatePanel(id, field, value) {
+    setPanels((prev) => prev.map((p) => p.id === id ? { ...p, [field]: value } : p));
+  }
+
+  function cancelMode() {
+    setMode("idle");
+    setDrawingPanelId(null);
+    setPendingCount(0);
+    pendingCornersRef.current = [];
+    pendingMarkersRef.current.forEach((m) => m.setMap(null));
+    pendingMarkersRef.current = [];
   }
 
   function startPlaceTree() {
     setMode("placeTree");
   }
 
-  function cancelMode() {
-    setMode("idle");
-    pendingCornersRef.current = [];
-    pendingMarkersRef.current.forEach((m) => m.setMap(null));
-    pendingMarkersRef.current = [];
-  }
-
   function confirmPendingTree() {
     if (!pendingTree) return;
-    // Remove the temporary pending marker — the trees sync effect will create the real one
     if (pendingMarkerRef.current) {
       pendingMarkerRef.current.setMap(null);
       pendingMarkerRef.current = null;
@@ -711,31 +737,48 @@ function SolarShadeApp() {
 
   function runAnalysis() {
     setValidationError(null);
-    if (!panelCorners) {
-      setValidationError("Draw a panel footprint first.");
+    if (panels.length === 0) {
+      setValidationError("Add at least one panel footprint.");
       return;
     }
-    const tilt = parseFloat(panelTilt);
-    if (!panelTilt || isNaN(tilt) || tilt <= 0) {
-      setValidationError("Panel tilt must be a positive number.");
+    const undrawn = panels.filter((p) => !p.corners);
+    if (undrawn.length > 0) {
+      setValidationError(`Panel "${undrawn[0].name}" has no drawn footprint.`);
       return;
+    }
+    for (const p of panels) {
+      const tilt = parseFloat(p.tilt_deg);
+      if (isNaN(tilt) || tilt <= 0) {
+        setValidationError(`Panel "${p.name}": tilt must be a positive number.`);
+        return;
+      }
     }
     Streamlit.setComponentValue({
       run_analysis: true,
       analysis_request_id: genId(),
       year,
-      panel_corners: panelCorners,
-      panel_tilt_deg: tilt,
+      panels: panels.map((p) => ({
+        id: p.id,
+        name: p.name,
+        corners: p.corners,
+        tilt_deg: parseFloat(p.tilt_deg),
+        height_m: parseFloat(p.height_m) || 1.0,
+      })),
       trees,
     });
   }
 
   function exportConfig() {
     const config = {
-      version: "1.0.0",
+      version: "1.1.0",
       year,
-      panelCorners: panelCorners || [],
-      panelTiltDeg: parseFloat(panelTilt) || 22,
+      panels: panels.map((p) => ({
+        id: p.id,
+        name: p.name,
+        corners: p.corners || [],
+        tilt_deg: parseFloat(p.tilt_deg) || 22,
+        height_m: parseFloat(p.height_m) || 1.0,
+      })),
       trees,
       exportedAt: new Date().toISOString(),
     };
@@ -755,19 +798,40 @@ function SolarShadeApp() {
     reader.onload = (ev) => {
       try {
         const cfg = JSON.parse(ev.target.result);
-        const required = ["version", "panelCorners", "panelTiltDeg", "trees"];
-        for (const f of required) {
-          if (!(f in cfg)) throw new Error(`Missing field: ${f}`);
+        let importedPanels;
+        if (Array.isArray(cfg.panels) && cfg.panels.length > 0) {
+          // v1.1.0 multi-panel format
+          importedPanels = cfg.panels.map((p) => ({
+            id: p.id || genId(),
+            name: p.name || "Panel",
+            corners: Array.isArray(p.corners) && p.corners.length === 4
+              ? ensureClockwise(p.corners) : null,
+            tilt_deg: String(p.tilt_deg ?? 22),
+            height_m: String(p.height_m ?? 1.0),
+          }));
+        } else if (Array.isArray(cfg.panelCorners)) {
+          // v1.0.0 single-panel format
+          if (cfg.panelCorners.length !== 4) throw new Error("panelCorners must have 4 corners");
+          importedPanels = [{
+            id: genId(),
+            name: "Panel 1",
+            corners: ensureClockwise(cfg.panelCorners),
+            tilt_deg: String(cfg.panelTiltDeg ?? 22),
+            height_m: "1.0",
+          }];
+        } else {
+          throw new Error("Missing panels or panelCorners field");
         }
-        if (!Array.isArray(cfg.panelCorners) || cfg.panelCorners.length !== 4) {
-          throw new Error("panelCorners must be an array of 4 corners");
+        // Clear existing polygons
+        Object.values(panelPolygonsRef.current).forEach((poly) => poly.setMap(null));
+        panelPolygonsRef.current = {};
+        setPanels(importedPanels);
+        if (mapInstanceRef.current) {
+          importedPanels.forEach((p) => {
+            if (p.corners) drawPanelPolygon(p.id, p.corners, mapInstanceRef.current);
+          });
         }
-        const corners = ensureClockwise(cfg.panelCorners);
-        setPanelCorners(corners);
-        if (mapInstanceRef.current) drawPolygon(corners, mapInstanceRef.current);
-        setPanelTilt(String(cfg.panelTiltDeg));
         setTrees(cfg.trees || []);
-        // Fix 2: restore year from imported config so Run Analysis uses it
         if (typeof cfg.year === "number") setYear(cfg.year);
         setImportError(null);
       } catch (err) {
@@ -781,34 +845,12 @@ function SolarShadeApp() {
   // ── Chart rendering ───────────────────────────────────────────────────────
   function renderChart(figJson) {
     if (!figJson) return null;
-    return (
-      <PlotlyEmbed figJson={figJson} key={figJson.slice(0, 40)} />
-    );
+    return <PlotlyEmbed figJson={figJson} key={figJson.slice(0, 40)} />;
   }
-
-  // ── Panel metadata (Fix 4) ───────────────────────────────────────────────
-  // Compute immediately from drawn corners so values appear without a backend run.
-  // After analysis, backend results take precedence.
-  const localMeta = computePanelMeta(panelCorners);
-  const panelMeta = results
-    ? {
-        azimuth: results.panel_azimuth_deg?.toFixed(1),
-        area: results.panel_area_m2?.toFixed(1),
-        widthM: null,
-        heightM: null,
-      }
-    : localMeta
-    ? {
-        azimuth: localMeta.azimuth.toFixed(1),
-        area: localMeta.area.toFixed(1),
-        widthM: localMeta.widthM.toFixed(1),
-        heightM: localMeta.heightM.toFixed(1),
-      }
-    : null;
 
   const modeLabel =
     mode === "drawPanel"
-      ? `Click 4 corners… (${pendingCornersRef.current?.length ?? 0}/4)`
+      ? `Click 4 corners… (${pendingCount}/4)`
       : mode === "placeTree"
       ? "Click map to place tree…"
       : null;
@@ -829,7 +871,7 @@ function SolarShadeApp() {
           <div style={S.section}>
             <div style={S.sectionTitle}>Panel Array</div>
             {mode === "drawPanel" ? (
-              <div>
+              <div style={{ marginBottom: 8 }}>
                 <div style={S.infoBox}>{modeLabel}</div>
                 <button style={{ ...S.btn, ...S.btnDanger, width: "100%" }} onClick={cancelMode}>
                   Cancel
@@ -838,38 +880,22 @@ function SolarShadeApp() {
             ) : (
               <button
                 style={{ ...S.btn, ...S.btnSecondary, width: "100%", marginBottom: 8 }}
-                onClick={startDrawPanel}
+                onClick={addPanel}
               >
-                {panelCorners ? "Redraw Panel" : "Draw Panel Footprint"}
+                + Add Panel
               </button>
             )}
-            {panelCorners && panelMeta && (
-              <div style={{ marginBottom: 8 }}>
-                <div style={S.panelMeta}>
-                  <div><b>Azimuth:</b> {panelMeta.azimuth}°</div>
-                  <div><b>Area:</b> {panelMeta.area} m²</div>
-                  {panelMeta.widthM && panelMeta.heightM && (
-                    <div><b>Dims:</b> ~{panelMeta.widthM} × {panelMeta.heightM} m</div>
-                  )}
-                  {!results && (
-                    <div style={{ color: "#94a3b8", fontSize: 11, marginTop: 4 }}>
-                      Estimated — run analysis for exact values
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
-            <div style={{ marginBottom: 8 }}>
-              <label style={S.label}>Panel Tilt (°)</label>
-              <input
-                style={S.input}
-                type="number"
-                min="1"
-                max="90"
-                value={panelTilt}
-                onChange={(e) => setPanelTilt(e.target.value)}
+            {panels.map((panel) => (
+              <PanelCard
+                key={panel.id}
+                panel={panel}
+                expanded={expandedPanel === panel.id}
+                onToggle={() => setExpandedPanel((id) => (id === panel.id ? null : panel.id))}
+                onChange={(f, v) => updatePanel(panel.id, f, v)}
+                onRedraw={() => redrawPanel(panel.id)}
+                onDelete={() => deletePanel(panel.id)}
               />
-            </div>
+            ))}
           </div>
 
           {/* Trees */}
@@ -931,10 +957,7 @@ function SolarShadeApp() {
         <div style={S.sidebarFooter}>
           {validationError && <div style={S.errorBox}>{validationError}</div>}
           {serverError && <div style={S.errorBox}>{serverError}</div>}
-          <button
-            style={{ ...S.btn, ...S.btnPrimary }}
-            onClick={runAnalysis}
-          >
+          <button style={{ ...S.btn, ...S.btnPrimary }} onClick={runAnalysis}>
             Run Analysis
           </button>
           {heatmapStatus === "running" && (
@@ -973,8 +996,11 @@ function SolarShadeApp() {
             </div>
 
             <div style={S.panelMeta}>
-              <span><b>Azimuth:</b> {results.panel_azimuth_deg?.toFixed(1)}° </span>
-              <span><b>Area:</b> {results.panel_area_m2?.toFixed(1)} m² </span>
+              {panels.length > 1
+                ? <span><b>{panels.length} panels</b> &nbsp;</span>
+                : <span><b>Azimuth:</b> {results.panel_azimuth_deg?.toFixed(1)}° &nbsp;</span>
+              }
+              <span><b>Area:</b> {results.panel_area_m2?.toFixed(1)} m² &nbsp;</span>
               <span><b>Year:</b> {year}</span>
             </div>
 
@@ -1002,6 +1028,77 @@ function SolarShadeApp() {
 
 // ── Sub-components ────────────────────────────────────────────────────────────
 
+function PanelCard({ panel, expanded, onToggle, onChange, onRedraw, onDelete }) {
+  const meta = computePanelMeta(panel.corners);
+  return (
+    <div style={S.treeCard}>
+      <div style={S.treeCardHeader} onClick={onToggle}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={{ fontSize: 14 }}>◼</span>
+          <span style={{ fontWeight: 500 }}>{panel.name}</span>
+          {!panel.corners && (
+            <span style={{ color: "#94a3b8", fontSize: 11 }}>not drawn</span>
+          )}
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+          {meta && <span style={S.metaTag}>{meta.area.toFixed(1)} m²</span>}
+          <button
+            style={{ ...S.btn, ...S.btnDanger, padding: "3px 7px", fontSize: 11 }}
+            onClick={(e) => { e.stopPropagation(); onDelete(); }}
+          >✕</button>
+        </div>
+      </div>
+      {expanded && (
+        <div style={S.treeCardBody}>
+          <label style={S.label}>Name</label>
+          <input
+            style={{ ...S.input, marginBottom: 6 }}
+            value={panel.name}
+            onChange={(e) => onChange("name", e.target.value)}
+          />
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 6 }}>
+            <div>
+              <label style={S.label}>Tilt (°)</label>
+              <input
+                style={S.input}
+                type="number"
+                min="1"
+                max="90"
+                value={panel.tilt_deg}
+                onChange={(e) => onChange("tilt_deg", e.target.value)}
+              />
+            </div>
+            <div>
+              <label style={S.label}>Height above ground (m)</label>
+              <input
+                style={S.input}
+                type="number"
+                min="0"
+                step="0.1"
+                value={panel.height_m}
+                onChange={(e) => onChange("height_m", e.target.value)}
+              />
+            </div>
+          </div>
+          {meta && (
+            <div style={{ ...S.panelMeta, marginBottom: 8, fontSize: 11 }}>
+              <b>Azimuth:</b> {meta.azimuth.toFixed(1)}° &nbsp;
+              <b>Area:</b> {meta.area.toFixed(1)} m² &nbsp;
+              <b>Dims:</b> ~{meta.widthM.toFixed(1)} × {meta.heightM.toFixed(1)} m
+            </div>
+          )}
+          <button
+            style={{ ...S.btn, ...S.btnSecondary, width: "100%" }}
+            onClick={onRedraw}
+          >
+            {panel.corners ? "Redraw Footprint" : "Draw Footprint"}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function PendingTreeForm({ tree, onChange, onConfirm, onCancel }) {
   return (
     <div style={{ ...S.treeCard, borderColor: "#fcd34d", marginBottom: 10 }}>
@@ -1010,23 +1107,16 @@ function PendingTreeForm({ tree, onChange, onConfirm, onCancel }) {
         <label style={S.label}>Name</label>
         <input style={{ ...S.input, marginBottom: 6 }} value={tree.name}
           onChange={(e) => onChange("name", e.target.value)} />
-        {/* Fix 3: lat/lon inputs — editing moves the marker live */}
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 6 }}>
           <div>
             <label style={S.label}>Latitude</label>
             <input style={S.input} type="number" step="0.000001" value={tree.lat}
-              onChange={(e) => {
-                const v = parseFloat(e.target.value);
-                if (!isNaN(v)) onChange("lat", v);
-              }} />
+              onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) onChange("lat", v); }} />
           </div>
           <div>
             <label style={S.label}>Longitude</label>
             <input style={S.input} type="number" step="0.000001" value={tree.lon}
-              onChange={(e) => {
-                const v = parseFloat(e.target.value);
-                if (!isNaN(v)) onChange("lon", v);
-              }} />
+              onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) onChange("lon", v); }} />
           </div>
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 6 }}>
@@ -1088,23 +1178,16 @@ function TreeCard({ tree, expanded, onToggle, onChange, onDelete }) {
           <label style={S.label}>Name</label>
           <input style={{ ...S.input, marginBottom: 6 }} value={tree.name}
             onChange={(e) => onChange("name", e.target.value)} />
-          {/* Fix 3: lat/lon inputs in expanded editor — marker moves live via trees state sync */}
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 6 }}>
             <div>
               <label style={S.label}>Latitude</label>
               <input style={S.input} type="number" step="0.000001" value={tree.lat}
-                onChange={(e) => {
-                  const v = parseFloat(e.target.value);
-                  if (!isNaN(v)) onChange("lat", v);
-                }} />
+                onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) onChange("lat", v); }} />
             </div>
             <div>
               <label style={S.label}>Longitude</label>
               <input style={S.input} type="number" step="0.000001" value={tree.lon}
-                onChange={(e) => {
-                  const v = parseFloat(e.target.value);
-                  if (!isNaN(v)) onChange("lon", v);
-                }} />
+                onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) onChange("lon", v); }} />
             </div>
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 6 }}>
@@ -1142,7 +1225,6 @@ function TreeCard({ tree, expanded, onToggle, onChange, onDelete }) {
   );
 }
 
-// Plotly chart renderer via iframe postMessage approach (avoids loading Plotly in main bundle)
 function PlotlyEmbed({ figJson }) {
   const ref = useRef(null);
   useEffect(() => {

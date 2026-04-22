@@ -4,7 +4,7 @@ __pycache__/
 .env
 .env.*
 node_modules/
-frontend/build/
+# frontend/build/ — intentionally tracked so source deployments work without Node
 frontend/.cache/
 .DS_Store
 *.egg-info/

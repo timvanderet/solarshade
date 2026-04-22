@@ -8,6 +8,21 @@ import streamlit.components.v1 as components
 
 st.set_page_config(layout="wide", page_title="SolarShade")
 
+# Guard: ensure the React bundle has been built before Streamlit tries to
+# serve it.  frontend/build/ is committed to the repo so source deployments
+# work without Docker, but this guard surfaces a clear error if somehow the
+# directory is absent (e.g. a fresh clone before Node build, or a botched
+# deploy).
+_BUILD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend", "build")
+_BUILD_INDEX = os.path.join(_BUILD_DIR, "index.html")
+if not os.path.isfile(_BUILD_INDEX):
+    st.error(
+        "**Frontend build missing.**  "
+        f"`{_BUILD_INDEX}` was not found.  "
+        "Run `cd frontend && npm install && npm run build` then restart the app."
+    )
+    st.stop()
+
 # Suppress Streamlit chrome and make the component fill the viewport.
 # Blank-page root cause: Streamlit wraps the custom component iframe in a
 # stVerticalBlock / stMainBlockContainer with inherent padding and sets the

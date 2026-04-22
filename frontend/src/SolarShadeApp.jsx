@@ -305,6 +305,22 @@ function ensureClockwise(corners) {
   return corners;
 }
 
+// Yellow → orange → red ramp for the planting-impact heatmap
+function heatColorRGB(t) {
+  const stops = [
+    [254, 240, 138],  // bright yellow
+    [253, 187,  78],  // amber
+    [252, 141,  52],  // orange
+    [227,  74,  51],  // red-orange
+    [165,   0,  38],  // deep red
+  ];
+  const n = stops.length - 1;
+  const idx = Math.min(Math.floor(t * n), n - 1);
+  const frac = t * n - idx;
+  const a = stops[idx], b = stops[idx + 1];
+  return [0, 1, 2].map((i) => Math.round(a[i] + frac * (b[i] - a[i])));
+}
+
 // Chevron indicator for expandable cards
 function Chevron({ expanded }) {
   return (
@@ -546,58 +562,99 @@ function SolarShadeApp() {
     });
   }, [trees, mapLoaded]);
 
-  // Planting-impact heatmap
+  // Planting-impact heatmap overlay
+  // Uses overlayLayer (correct coordinate space for fromLatLngToDivPixel).
+  // Canvas is inserted at the front of the pane so panel polygon SVG elements
+  // (added later) render above it. Tree markers are in markerLayer, always above.
   useEffect(() => {
     const map = mapInstanceRef.current;
     if (!map || !window.google) return;
-    if (canvasOverlayRef.current) { canvasOverlayRef.current.setMap(null); canvasOverlayRef.current = null; }
-    if (!heatmapGrid || heatmapGrid.length === 0) return;
-    const maxShade = Math.max(...heatmapGrid.map((p) => p.shade_pct), 0.001);
-    if (maxShade === 0) return;
 
-    function heatColor(t) {
-      const stops = [[254,240,217,0],[253,187,132,100],[252,141,89,160],[227,74,51,200],[179,0,0,220]];
-      const idx = Math.min(Math.floor(t * (stops.length - 1)), stops.length - 2);
-      const frac = t * (stops.length - 1) - idx;
-      const a = stops[idx], b = stops[idx + 1];
-      return [0,1,2,3].map((i) => Math.round(a[i] + frac * (b[i] - a[i])));
+    if (canvasOverlayRef.current) {
+      canvasOverlayRef.current.setMap(null);
+      canvasOverlayRef.current = null;
     }
+
+    if (!heatmapGrid || heatmapGrid.length === 0) return;
+    const maxShade = Math.max(...heatmapGrid.map((p) => p.shade_pct), 0);
+    if (maxShade <= 0) return;
 
     class HeatOverlay extends window.google.maps.OverlayView {
       constructor(data, max) { super(); this.data = data; this.max = max; }
+
       onAdd() {
         this.canvas = document.createElement("canvas");
-        this.canvas.style.position = "absolute";
-        this.getPanes().overlayLayer.appendChild(this.canvas);
+        this.canvas.style.cssText = "position:absolute;pointer-events:none;";
+        // Insert at the front of overlayLayer so native polygon SVG elements
+        // (added later) sit above the canvas in DOM order.
+        const pane = this.getPanes().overlayLayer;
+        pane.insertBefore(this.canvas, pane.firstChild || null);
       }
+
       draw() {
         const proj = this.getProjection();
         if (!proj) return;
-        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+
         const pts = this.data.map((d) => {
           const p = proj.fromLatLngToDivPixel(new window.google.maps.LatLng(d.lat, d.lon));
-          minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
-          maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y);
           return { x: p.x, y: p.y, v: d.shade_pct };
         });
-        const pad = 30;
-        this.canvas.width = Math.max(1, Math.round(maxX - minX + pad * 2));
-        this.canvas.height = Math.max(1, Math.round(maxY - minY + pad * 2));
+
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        for (const p of pts) {
+          if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
+          if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y;
+        }
+
+        // Derive circle radius from adjacent grid point pixel spacing so circles
+        // fill gaps and overlap gently at any zoom level.
+        // Grid data is row-major (grid_size cols per row), so pts[1] is one column
+        // right of pts[0] — their distance equals one grid cell in pixels.
+        let radius = 18;
+        if (pts.length > 1) {
+          const dx = pts[1].x - pts[0].x;
+          const dy = pts[1].y - pts[0].y;
+          radius = Math.max(Math.sqrt(dx * dx + dy * dy), 6);
+        }
+
+        const pad = radius + 4;
+        const cw = Math.max(1, Math.ceil(maxX - minX + pad * 2));
+        const ch = Math.max(1, Math.ceil(maxY - minY + pad * 2));
+        this.canvas.width = cw;
+        this.canvas.height = ch;
         this.canvas.style.left = (minX - pad) + "px";
         this.canvas.style.top = (minY - pad) + "px";
+
         const ctx = this.canvas.getContext("2d");
-        ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-        for (const p of pts) {
+        ctx.clearRect(0, 0, cw, ch);
+
+        // Render low-intensity points first so high-intensity draws on top
+        const sorted = [...pts].sort((a, b) => a.v - b.v);
+
+        for (const p of sorted) {
           const t = Math.min(p.v / this.max, 1);
-          if (t < 0.01) continue;
-          const [r, g, b, a] = heatColor(t);
-          ctx.fillStyle = `rgba(${r},${g},${b},${a / 255})`;
+          if (t < 0.02) continue;
+          const cx = p.x - minX + pad;
+          const cy = p.y - minY + pad;
+          const [r, g, b] = heatColorRGB(t);
+          // Center opacity scales with intensity (12 %–60 %) and fades to 0 at edge
+          const alpha = 0.12 + t * 0.48;
+          const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius);
+          grad.addColorStop(0,   `rgba(${r},${g},${b},${alpha.toFixed(2)})`);
+          grad.addColorStop(0.5, `rgba(${r},${g},${b},${(alpha * 0.45).toFixed(2)})`);
+          grad.addColorStop(1,   `rgba(${r},${g},${b},0)`);
           ctx.beginPath();
-          ctx.arc(p.x - minX + pad, p.y - minY + pad, 14, 0, Math.PI * 2);
+          ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+          ctx.fillStyle = grad;
           ctx.fill();
         }
       }
-      onRemove() { if (this.canvas?.parentNode) this.canvas.parentNode.removeChild(this.canvas); }
+
+      onRemove() {
+        if (this.canvas && this.canvas.parentNode) {
+          this.canvas.parentNode.removeChild(this.canvas);
+        }
+      }
     }
 
     const overlay = new HeatOverlay(heatmapGrid, maxShade);

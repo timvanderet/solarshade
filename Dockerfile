@@ -17,7 +17,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY solar.py geometry.py panels.py scenario.py analysis.py app.py ./
+COPY *.py ./
 
 # Copy built frontend assets into the path declared in app.py
 COPY --from=frontend-builder /app/frontend/build ./frontend/build

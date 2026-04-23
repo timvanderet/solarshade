@@ -265,6 +265,46 @@ def run_multi_panel_scenario(
     return combined
 
 
+def _sample_heatmap_solar(solar_df) -> "pd.DataFrame":
+    """Reduce a full-year hourly solar DataFrame to one representative day per
+    month (the day nearest the 15th), with irradiance weights rescaled so the
+    sample sums to the same monthly total as the full dataset.
+
+    This yields ~130-150 rows instead of ~4,400, a ~30x reduction that makes
+    the 40x40 heatmap grid feasible (~5s) without meaningfully degrading
+    accuracy for a spatial planting-guide heatmap.
+    """
+    df = solar_df.copy()
+    df["_m"] = df["datetime"].apply(
+        lambda x: (x.to_pydatetime() if hasattr(x, "to_pydatetime") else x).month
+    )
+    df["_d"] = df["datetime"].apply(
+        lambda x: (x.to_pydatetime() if hasattr(x, "to_pydatetime") else x).day
+    )
+
+    sampled = []
+    for month in range(1, 13):
+        mdf = df[df["_m"] == month]
+        if mdf.empty:
+            continue
+        monthly_weight = mdf["irradiance_weight"].sum()
+        if monthly_weight <= 0:
+            continue
+        # Day closest to the 15th
+        days = mdf["_d"].unique()
+        rep_day = int(days[np.argmin(np.abs(days - 15))])
+        ddf = mdf[mdf["_d"] == rep_day].copy()
+        day_weight = ddf["irradiance_weight"].sum()
+        if day_weight > 0:
+            ddf["irradiance_weight"] = ddf["irradiance_weight"] * (monthly_weight / day_weight)
+            sampled.append(ddf)
+
+    if not sampled:
+        return solar_df  # fallback: use full dataset
+    import pandas as _pd
+    return _pd.concat(sampled, ignore_index=True)
+
+
 def run_heatmap_grid(
     panel_corners: list[tuple[float, float]],
     panel_tilt_deg: float,
@@ -276,6 +316,11 @@ def run_heatmap_grid(
     grid_spacing_m: float = 2.0,
     panel_height_m: float = 0.0,
 ) -> list[dict]:
+    import time as _time
+    import logging
+    from shapely.affinity import translate as _shapely_translate
+    t0 = _time.monotonic()
+
     centroid_lat, centroid_lon = _panel_centroid(panel_corners)
     if timezone is None:
         timezone = _infer_timezone(centroid_lat, centroid_lon)
@@ -283,9 +328,45 @@ def run_heatmap_grid(
     origin_lat, origin_lon = centroid_lat, centroid_lon
     panel_poly, _, _, _ = build_panel_polygon(panel_corners, origin_lat, origin_lon)
 
-    # Compute solar timeseries once and reuse across all grid points
+    # Full solar timeseries (used by main scenario); sample it for the heatmap.
     solar_df = get_solar_timeseries(centroid_lat, centroid_lon, timezone, year)
-    total_daylight_hours = len(solar_df)
+    heatmap_df = _sample_heatmap_solar(solar_df)
+    logging.info(
+        "Heatmap solar sample: %d → %d rows", len(solar_df), len(heatmap_df)
+    )
+
+    # Precompute shadow template polygons centered at local origin (0, 0) for
+    # each sampled timestep.  The representative tree is always cylinder +
+    # evergreen per spec; a tree at grid position (gx, gy) casts the same
+    # shape shadow, merely translated — so we compute the polygon once per
+    # timestep and call shapely.affinity.translate() per grid point instead of
+    # rebuilding from 32 trig points every time.
+    template_tree = {
+        "id": "_tpl",
+        "name": "_tpl",
+        "lat": origin_lat,
+        "lon": origin_lon,
+        "height_m": tree_height_m,
+        "canopy_radius_m": canopy_radius_m,
+        "shape": "cylinder",
+        "deciduous": False,
+    }
+    templates: list[tuple] = []
+    for _, srow in heatmap_df.iterrows():
+        dt = srow["datetime"]
+        if hasattr(dt, "to_pydatetime"):
+            dt = dt.to_pydatetime()
+        sp = compute_shadow_polygon(
+            template_tree,
+            srow["solar_azimuth"],
+            srow["solar_elevation"],
+            origin_lat,
+            origin_lon,
+            dt.date(),
+            panel_height_m=panel_height_m,
+        )
+        if sp is not None:
+            templates.append((sp, float(srow["irradiance_weight"])))
 
     half = (grid_size - 1) / 2.0 * grid_spacing_m
     results = []
@@ -296,34 +377,11 @@ def run_heatmap_grid(
             gy = -half + row * grid_spacing_m
             pt_lat, pt_lon = local_to_gps(gx, gy, origin_lat, origin_lon)
 
-            tree = {
-                "id": f"grid_{row}_{col}",
-                "name": "grid",
-                "lat": pt_lat,
-                "lon": pt_lon,
-                "height_m": tree_height_m,
-                "canopy_radius_m": canopy_radius_m,
-                "shape": "cylinder",
-                "deciduous": False,
-            }
-
             irr_shaded = 0.0
-            for _, srow in solar_df.iterrows():
-                dt = srow["datetime"]
-                if hasattr(dt, "to_pydatetime"):
-                    dt = dt.to_pydatetime()
-                date = dt.date()
-                sp = compute_shadow_polygon(
-                    tree,
-                    srow["solar_azimuth"],
-                    srow["solar_elevation"],
-                    origin_lat,
-                    origin_lon,
-                    date,
-                    panel_height_m=panel_height_m,
-                )
+            for tpl_sp, weight in templates:
+                sp = _shapely_translate(tpl_sp, gx, gy)
                 frac = shade_fraction(panel_poly, sp)
-                irr_shaded += frac * srow["irradiance_weight"]
+                irr_shaded += frac * weight
 
             results.append({
                 "lat": pt_lat,
@@ -331,6 +389,11 @@ def run_heatmap_grid(
                 "shade_pct": round(irr_shaded * 100, 4),
             })
 
+    elapsed = _time.monotonic() - t0
+    logging.info(
+        "Heatmap complete: %dx%d=%d pts, %d templates, %.1fs",
+        grid_size, grid_size, grid_size * grid_size, len(templates), elapsed,
+    )
     return results
 
 
